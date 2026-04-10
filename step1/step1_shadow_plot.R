@@ -12,6 +12,14 @@ targets   = read.csv("../Project data and resources/targets.csv")
 # clearing cell j kills all edges into j, so score(j) = sum of shadow prices -> j
 # -----------------------------------------------------------------------------
 
+#' Aggregate shadow prices by receiving cell
+#'
+#' Reads a shadow price CSV and sums dual values on all edges pointing
+#' into each cell. Clearing cell j removes all incoming edges, so the
+#' sum represents how much max-flow would drop if j were cleared.
+#'
+#' @param csv_file path to shadow_prices CSV (from AMPL .run output)
+#' @return 21x21 matrix of cell-level bottleneck scores
 aggregate_shadow = function(csv_file) {
     df = read.csv(csv_file)
 
@@ -38,6 +46,14 @@ aggregate_shadow = function(csv_file) {
 # Heatmap panel
 # -----------------------------------------------------------------------------
 
+#' Plot a bottleneck heatmap for one target
+#'
+#' Draws a white-to-red heatmap of cell scores with blue outlines on targets.
+#' Row 1 (north) is at the top.
+#'
+#' @param mat 21x21 matrix of bottleneck scores
+#' @param title plot title (should state the finding)
+#' @param target_cells data frame with row, col columns for blue outlines
 plot_heatmap = function(mat, title, target_cells = NULL) {
     cols = colorRampPalette(c("white", "firebrick"))(256)
     max_val = max(mat)
@@ -92,6 +108,11 @@ cat("Saved: figures/step1_shadow_heatmap.png\n")
 # Top bottleneck cells
 # -----------------------------------------------------------------------------
 
+#' Print top n bottleneck cells to console
+#'
+#' @param mat 21x21 matrix of bottleneck scores
+#' @param label name for display (e.g. "Settlement")
+#' @param n how many cells to print (default 10)
 print_top = function(mat, label, n = 10) {
     df = expand.grid(row = 1:21, col = 1:21)
     df$score = as.vector(mat)

@@ -9,6 +9,18 @@ source("../Project data and resources/fire-simulator.r")
 # Generate .dat file for maxflow.mod
 # -----------------------------------------------------------------------------
 
+#' Generate AMPL .dat file for the max-flow model
+#'
+#' Builds the network (source -> ignition row, spread edges, targets -> sink)
+#' and writes it in AMPL-readable format matching step1_maxflow.mod.
+#'
+#' @param edges_df data frame from spread_probabilities() with columns
+#'   from_row, from_col, to_row, to_col, p_burn
+#' @param target_cells data frame with row, col columns (settlement or wetland)
+#' @param outfile path for the output .dat file
+#' @param ignition_row which row is the fire source (default 21 = south)
+#' @param big_M large capacity for source/sink arcs (default 999)
+#' @return writes .dat file, prints summary to console
 generate_maxflow_dat = function(edges_df, target_cells, outfile,
                                 ignition_row = 21, big_M = 999) {
     node_name = function(r, c) paste0(r, "_", c)
