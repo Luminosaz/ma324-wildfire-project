@@ -23,13 +23,18 @@
 
 ---
 
-## Day 1 (2026-04-09) — Step 1 max-flow
+## Day 1 (2026-04-10) — Step 1 max-flow
 
 ### Numbers
-(fill in)
+- Settlement max flow = 4.06
+- Wetland max flow = 3.795
+- Total edges (no wind): 3248
+- Vegetated cells: 439, bare ground: 2
 
 ### Discussion bullets
-- (fill in)
+- Settlement 比 wetland 更难保护（max flow 4.06 vs 3.795），火压力更大
+- 瓶颈集中在目标区域紧邻外围（settlement: cols 15-16 + row 7, wetland: cols 7-8 + row 7），不在 current corridor (row 10)
+- Current corridor 放太远了——row 10 离两个目标都有 4 行距离，火可以绕过去。bottleneck 分析说防线应该贴着目标放
 
 ---
 
