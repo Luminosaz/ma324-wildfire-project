@@ -1,0 +1,36 @@
+# ============================================================
+# Solve max-flow for settlement and wetland, extract shadow prices
+# ============================================================
+
+option solver "/Users/jerrymac/Library/Python/3.9/lib/python/site-packages/ampl_module_gurobi/bin/gurobi";
+
+# --- Settlement ---
+reset;
+model step1_maxflow.mod;
+data step1_settlement.dat;
+solve;
+printf "Settlement max flow = %g\n", TotalFlow;
+
+printf "from,to,flow,capacity,shadow_price\n" > "shadow_prices_settlement.csv";
+for {(i,j) in ARCS: i <> "T" or j <> "S"} {
+    printf "%s,%s,%g,%g,%g\n",
+        i, j, flow[i,j], cap[i,j], Capacity[i,j].dual
+        >> "shadow_prices_settlement.csv";
+}
+
+# --- Wetland ---
+reset;
+model step1_maxflow.mod;
+data step1_wetland.dat;
+option solver "/Users/jerrymac/Library/Python/3.9/lib/python/site-packages/ampl_module_gurobi/bin/gurobi";
+solve;
+printf "Wetland max flow = %g\n", TotalFlow;
+
+printf "from,to,flow,capacity,shadow_price\n" > "shadow_prices_wetland.csv";
+for {(i,j) in ARCS: i <> "T" or j <> "S"} {
+    printf "%s,%s,%g,%g,%g\n",
+        i, j, flow[i,j], cap[i,j], Capacity[i,j].dual
+        >> "shadow_prices_wetland.csv";
+}
+
+printf "\nDone. Both shadow price CSVs written.\n";
