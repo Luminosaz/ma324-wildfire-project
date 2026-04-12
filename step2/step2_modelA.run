@@ -1,0 +1,36 @@
+# ============================================================
+# Step 2 — Model A: Binary propagation runner
+# ============================================================
+# R calls via a temp .run wrapper:
+#
+#   reset;
+#   model firebreak_A.mod;
+#   data firebreak.dat;
+#   let B := 13;
+#   let tau := 0.1;
+#   include firebreak_A.run;
+#
+# ============================================================
+
+# --- Solver --------------------------------------------------
+option solver "/Users/jerrymac/Library/Python/3.9/lib/python/site-packages/ampl_module_gurobi/bin/gurobi";
+option gurobi_options 'mipgap=0.01 timelim=120';
+
+# --- Solve ---------------------------------------------------
+solve;
+
+# --- Output: summary -----------------------------------------
+# FORMAT:  SUMMARY,<objective>,<solve_status>
+printf "SUMMARY,%f,%d\n", Total_Damage, solve_result_num;
+
+# --- Output: cleared cells -----------------------------------
+# FORMAT:  CLEARED,<cell>
+for {v in CELLS: clear[v] > 0.5} {
+    printf "CLEARED,%s\n", v;
+}
+
+# --- Output: damaged targets ---------------------------------
+# FORMAT:  DAMAGED,<cell>,<weight>,<damage_value>
+for {t in TARGETS: burn[t] > 0.5} {
+    printf "DAMAGED,%s,%d,%f\n", t, weight[t], burn[t];
+}
