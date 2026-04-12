@@ -10,16 +10,16 @@
 source("../.Rprofile")
 
 # --- Load data -----------------------------------------------
-res1 <- read.csv("step2_results.csv",   stringsAsFactors = FALSE)
-res2 <- read.csv("step2_results_A.csv", stringsAsFactors = FALSE)
-sim  <- read.csv("step2_sim_results_K1000.csv", stringsAsFactors = FALSE)
+res1 = read.csv("step2_results.csv",   stringsAsFactors = FALSE)
+res2 = read.csv("step2_results_A.csv", stringsAsFactors = FALSE)
+sim = read.csv("step2_sim_results_K1000.csv", stringsAsFactors = FALSE)
 
-data_dir  <- "../../Project data and resources"
-landscape <- as.matrix(read.table(file.path(data_dir, "landscape.csv"),
+data_dir  ="../../Project data and resources"
+landscape = as.matrix(read.table(file.path(data_dir, "landscape.csv"),
                                   sep = ",", header = FALSE))
-targets   <- read.csv(file.path(data_dir, "targets.csv"))
+targets  = read.csv(file.path(data_dir, "targets.csv"))
 
-all_res <- rbind(res1, res2)
+all_res = rbind(res1, res2)
 
 # =============================================================
 # Helpers
@@ -31,15 +31,15 @@ all_res <- rbind(res1, res2)
 #'
 #' @return Integer matrix with columns named `row` and `col`,
 #'   or a 0-row matrix if input is NA or empty
-parse_cells <- function(cell_str) {
+parse_cells = function(cell_str) {
   if (is.na(cell_str) || nchar(trimws(cell_str)) == 0) {
     return(matrix(integer(0), ncol = 2,
                   dimnames = list(NULL, c("row", "col"))))
   }
-  tokens <- strsplit(cell_str, ";")[[1]]
-  parts  <- strsplit(tokens, "_")
-  rc     <- do.call(rbind, lapply(parts, as.integer))
-  colnames(rc) <- c("row", "col")
+  tokens = strsplit(cell_str, ";")[[1]]
+  parts = strsplit(tokens, "_")
+  rc    = do.call(rbind, lapply(parts, as.integer))
+  colnames(rc) = c("row", "col")
   rc
 }
 
@@ -51,21 +51,21 @@ parse_cells <- function(cell_str) {
 #' @param title      Character string for plot title
 #'
 #' @return NULL (called for side effect of drawing)
-draw_grid <- function(landscape, targets, breaks_rc, title) {
-  nr <- nrow(landscape)
-  nc <- ncol(landscape)
+draw_grid = function(landscape, targets, breaks_rc, title) {
+  nr = nrow(landscape)
+  nc = ncol(landscape)
 
   # Vegetation type: tens digit (1=grass, 2=shrub, 3=forest, 0=bare)
-  veg <- landscape %/% 10
+  veg = landscape %/% 10
   # Colour map: bare=white, grass=lightyellow, shrub=khaki, forest=darkgreen
-  veg_cols <- c("0" = "grey95", "1" = "#d4e89c", "2" = "#8db944", "3" = "#2d6a1e")
+  veg_cols = c("0" = "grey95", "1" = "#d4e89c", "2" = "#8db944", "3" = "#2d6a1e")
 
   # Build colour matrix
-  col_mat <- matrix("grey95", nr, nc)
+  col_mat = matrix("grey95", nr, nc)
   for (r in 1:nr) {
     for (c in 1:nc) {
-      v <- as.character(veg[r, c])
-      if (v %in% names(veg_cols)) col_mat[r, c] <- veg_cols[v]
+      v = as.character(veg[r, c])
+      if (v %in% names(veg_cols)) col_mat[r, c] = veg_cols[v]
     }
   }
 
@@ -78,7 +78,7 @@ draw_grid <- function(landscape, targets, breaks_rc, title) {
   # Mark firebreaks
   if (!is.null(breaks_rc) && nrow(breaks_rc) > 0) {
     for (i in seq_len(nrow(breaks_rc))) {
-      col_mat[breaks_rc[i, 1], breaks_rc[i, 2]] <- "#e74c3c"
+      col_mat[breaks_rc[i, 1], breaks_rc[i, 2]] ="#e74c3c"
     }
   }
 
@@ -104,45 +104,45 @@ draw_grid <- function(landscape, targets, breaks_rc, title) {
 # =============================================================
 # Panel 1 data: Model B damage vs B at each α
 # =============================================================
-modelB <- all_res[all_res$model == "B", ]
-alpha_vals <- sort(unique(modelB$param_value))
-B_vals     <- sort(unique(modelB$B))
+modelB = all_res[all_res$model == "B", ]
+alpha_vals = sort(unique(modelB$param_value))
+B_vals     = sort(unique(modelB$B))
 
 # Colours for α lines
-alpha_cols <- c("#e74c3c", "#e67e22", "#2ecc71", "#3498db", "#9b59b6")
-names(alpha_cols) <- as.character(alpha_vals)
+alpha_cols = c("#e74c3c", "#e67e22", "#2ecc71", "#3498db", "#9b59b6")
+names(alpha_cols) = as.character(alpha_vals)
 
 # =============================================================
 # Panel 2 data: Model A τ=0 vs Model B α=0.1 vs simulator
 # =============================================================
-modelA_tau0  <- all_res[all_res$model == "A" &
+modelA_tau0  = all_res[all_res$model == "A" &
                         all_res$param_value == 0, ]
-modelA_tau0  <- modelA_tau0[!duplicated(modelA_tau0$B), ]
-modelA_tau0  <- modelA_tau0[order(modelA_tau0$B), ]
+modelA_tau0  = modelA_tau0[!duplicated(modelA_tau0$B), ]
+modelA_tau0  = modelA_tau0[order(modelA_tau0$B), ]
 
-modelB_a01   <- modelB[modelB$param_value == 0.1, ]
-modelB_a01   <- modelB_a01[!duplicated(modelB_a01$B), ]
-modelB_a01   <- modelB_a01[order(modelB_a01$B), ]
+modelB_a01   = modelB[modelB$param_value == 0.1, ]
+modelB_a01   = modelB_a01[!duplicated(modelB_a01$B), ]
+modelB_a01   = modelB_a01[order(modelB_a01$B), ]
 
 # Simulator results (exclude corridor and baseline for overlay)
-sim_milp <- sim[sim$model %in% c("A", "B"), ]
+sim_milp = sim[sim$model %in% c("A", "B"), ]
 
 # =============================================================
 # Panel 3 data: key plans — use B=16 where A and B disagree
 # =============================================================
 # Model A B=16 τ=0 (uses only 13 of 16 cells — settlement only)
-a16 <- all_res[all_res$model == "A" & all_res$B == 16 &
+a16 = all_res[all_res$model == "A" & all_res$B == 16 &
                all_res$param_value == 0 &
                nchar(trimws(all_res$cleared_cells)) > 0, ]
-a16_rc <- if (nrow(a16) > 0) parse_cells(a16$cleared_cells[1]) else NULL
+a16_rc = if (nrow(a16) > 0) parse_cells(a16$cleared_cells[1]) else NULL
 
 # Model B B=16 α=0.1 (uses all 16 cells — adds wetland protection)
-b16 <- modelB[modelB$B == 16 & modelB$param_value == 0.1 &
+b16 = modelB[modelB$B == 16 & modelB$param_value == 0.1 &
               nchar(trimws(modelB$cleared_cells)) > 0, ]
-b16_rc <- if (nrow(b16) > 0) parse_cells(b16$cleared_cells[1]) else NULL
+b16_rc = if (nrow(b16) > 0) parse_cells(b16$cleared_cells[1]) else NULL
 
 # Current corridor: row 10, cols 3–19
-corr_rc <- cbind(row = rep(10, 17), col = 3:19)
+corr_rc = cbind(row = rep(10, 17), col = 3:19)
 
 # =============================================================
 # Draw figure
@@ -161,9 +161,9 @@ plot(NA, xlim = range(B_vals), ylim = c(0, max(modelB$damage) * 1.05),
      xlab = "Budget B", ylab = "MILP damage",
      main = "Model B: damage vs budget")
 for (i in seq_along(alpha_vals)) {
-  a  <- alpha_vals[i]
-  dd <- modelB[modelB$param_value == a, ]
-  dd <- dd[order(dd$B), ]
+  a  = alpha_vals[i]
+  dd = modelB[modelB$param_value == a, ]
+  dd = dd[order(dd$B), ]
   lines(dd$B, dd$damage, col = alpha_cols[i], lwd = 2, type = "b",
         pch = 15 + i - 1, cex = 0.9)
 }
@@ -178,14 +178,14 @@ legend("topright", legend = paste0("\u03b1=", alpha_vals),
 par(mar = c(4, 4.2, 2.5, 4.2))
 
 # Simulator scale
-sim_ymax <- max(sim$sim_ci_hi[!is.na(sim$sim_ci_hi)], na.rm = TRUE) * 1.3
+sim_ymax = max(sim$sim_ci_hi[!is.na(sim$sim_ci_hi)], na.rm = TRUE) * 1.3
 plot(NA, xlim = range(B_vals), ylim = c(0, sim_ymax),
      xlab = "Budget B", ylab = "Simulated damage (K=1000)",
      main = "MILP prediction vs simulator")
 
 # Baseline and corridor reference lines
-bl_mean   <- sim$sim_mean[sim$plan_label == "baseline"]
-corr_mean <- sim$sim_mean[sim$plan_label == "corridor_row10"]
+bl_mean  = sim$sim_mean[sim$plan_label == "baseline"]
+corr_mean = sim$sim_mean[sim$plan_label == "corridor_row10"]
 abline(h = bl_mean,   lty = 3, col = "grey50", lwd = 1.2)
 abline(h = corr_mean, lty = 2, col = "grey50", lwd = 1.2)
 text(19, bl_mean + 0.7,   "no firebreaks", cex = 0.65, col = "grey40", adj = 1)
@@ -193,19 +193,19 @@ text(19, corr_mean - 0.7, "corridor",       cex = 0.65, col = "grey40", adj = 1)
 
 # Simulator points with error bars
 for (i in seq_len(nrow(sim_milp))) {
-  s    <- sim_milp[i, ]
-  pcol <- if (s$model == "A") "#c0392b" else "#e67e22"
-  ppch <- if (s$model == "A") 17 else 15
+  s   = sim_milp[i, ]
+  pcol = if (s$model == "A") "#c0392b" else "#e67e22"
+  ppch = if (s$model == "A") 17 else 15
   # Slight x-jitter to separate A and B at same budget
-  xj   <- s$B + if (s$model == "A") -0.25 else 0.25
+  xj   = s$B + if (s$model == "A") -0.25 else 0.25
   points(xj, s$sim_mean, pch = ppch, col = pcol, cex = 1.1, lwd = 1.5)
   arrows(xj, s$sim_ci_lo, xj, s$sim_ci_hi,
          code = 3, angle = 90, length = 0.04, col = pcol, lwd = 1.3)
 }
 
 # MILP predictions on secondary y-axis (right)
-milp_max <- max(c(modelA_tau0$damage, modelB_a01$damage), na.rm = TRUE)
-scale_f  <- sim_ymax / milp_max
+milp_max = max(c(modelA_tau0$damage, modelB_a01$damage), na.rm = TRUE)
+scale_f = sim_ymax / milp_max
 lines(modelA_tau0$B, modelA_tau0$damage * scale_f,
       col = "#2c3e50", lwd = 1.5, lty = 2)
 points(modelA_tau0$B, modelA_tau0$damage * scale_f,
