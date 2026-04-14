@@ -36,9 +36,15 @@ To figure out which cells are most important to clear, we look at the shadow pri
 
 **Code**
 
-Max-flow on fire spread network:
+Max-flow model (.mod):
 
 ```ampl
+# Max-flow on fire spread network
+# Step 1: Network bottleneck analysis
+# Nodes: grid cells as "r_c" plus super-source "S" and "T"
+# Edges: spread probabilities as capacities
+# Return arc T -> S (unconstrained) for standard max-flow
+
 # Sets
 set NODES;
 set ARCS within {NODES, NODES};
@@ -61,53 +67,112 @@ subject to Capacity {(i,j) in ARCS: i <> "T" or j <> "S"}:
     flow[i,j] <= cap[i,j];
 ```
 
-The .run script solves both targets with Gurobi and exports shadow prices to CSV via `Capacity[i,j].dual`.
+AMPL script to solve max-flow and extract shadow prices (.run):
 
-R function to build the network and generate .dat files:
+```ampl
+option solver gurobi;
+
+# --- Settlement ---
+reset;
+model step1_maxflow.mod;
+data step1_settlement.dat;
+solve;
+printf "Settlement max flow = %g\n", TotalFlow;
+
+printf "from,to,flow,capacity,shadow_price\n" > "shadow_prices_settlement.csv";
+for {(i,j) in ARCS: i <> "T" or j <> "S"} {
+    printf "%s,%s,%g,%g,%g\n",
+        i, j, flow[i,j], cap[i,j], Capacity[i,j].dual
+        >> "shadow_prices_settlement.csv";
+}
+
+# --- Wetland ---
+reset;
+model step1_maxflow.mod;
+data step1_wetland.dat;
+option solver gurobi;
+solve;
+printf "Wetland max flow = %g\n", TotalFlow;
+
+printf "from,to,flow,capacity,shadow_price\n" > "shadow_prices_wetland.csv";
+for {(i,j) in ARCS: i <> "T" or j <> "S"} {
+    printf "%s,%s,%g,%g,%g\n",
+        i, j, flow[i,j], cap[i,j], Capacity[i,j].dual
+        >> "shadow_prices_wetland.csv";
+}
+```
+
+R function to generate max-flow .dat file from spread probabilities:
 
 ```r
 #' Generate AMPL .dat file for the max-flow model
 #'
-#' @param edges_df data frame from spread_probabilities()
-#' @param target_cells data frame with row, col columns
+#' Builds the network (source -> ignition row, spread edges, targets -> sink)
+#' and writes it in AMPL-readable format matching step1_maxflow.mod.
+#'
+#' @param edges_df data frame from spread_probabilities() with columns
+#'   from_row, from_col, to_row, to_col, p_burn
+#' @param target_cells data frame with row, col columns (settlement or wetland)
 #' @param outfile path for the output .dat file
-#' @param ignition_row fire source row (default 21)
-#' @param big_M capacity for source/sink arcs (default 999)
-#' @return writes .dat file to disk
+#' @param ignition_row which row is the fire source (default 21 = south)
+#' @param big_M large capacity for source/sink arcs (default 999)
+#' @return writes .dat file, prints summary to console
 generate_maxflow_dat = function(edges_df, target_cells, outfile,
                                 ignition_row = 21, big_M = 999) {
     node_name = function(r, c) paste0(r, "_", c)
 
+    # All grid nodes from edge list (bare ground already excluded by spread_probabilities)
     grid_nodes = unique(c(
         node_name(edges_df$from_row, edges_df$from_col),
         node_name(edges_df$to_row,   edges_df$to_col)
     ))
     all_nodes = c("S", "T", sort(grid_nodes))
 
+    # Ignition: all cells in ignition row that exist as nodes
     ignition_nodes = grep(paste0("^", ignition_row, "_"), grid_nodes, value = TRUE)
     target_nodes   = intersect(node_name(target_cells$row, target_cells$col), grid_nodes)
 
+    if (length(ignition_nodes) == 0) stop("No ignition nodes found")
+    if (length(target_nodes) == 0)   stop("No target nodes found")
+
+    # Build arc list
     arcs = data.frame(
         from = node_name(edges_df$from_row, edges_df$from_col),
         to   = node_name(edges_df$to_row,   edges_df$to_col),
         cap  = edges_df$p_burn
     )
+
     source_arcs = data.frame(from = "S", to = ignition_nodes, cap = big_M)
     sink_arcs   = data.frame(from = target_nodes, to = "T",   cap = big_M)
     return_arc  = data.frame(from = "T", to = "S", cap = big_M)
+
     all_arcs = rbind(return_arc, source_arcs, sink_arcs, arcs)
 
-    # Write NODES, ARCS+cap in AMPL .dat format
+    # Write .dat
     f = file(outfile, open = "w")
     on.exit(close(f))
+
+    writeLines(sprintf("# Max-flow data | ignition row: %d | targets: %d | arcs: %d",
+                       ignition_row, length(target_nodes), nrow(arcs)), f)
+    writeLines("", f)
+
+    # Nodes
     writeLines("set NODES :=", f)
-    writeLines(paste("  ", paste(all_nodes, collapse = " ")), f)
+    chunks = split(all_nodes, ceiling(seq_along(all_nodes) / 10))
+    for (chunk in chunks) {
+        writeLines(paste("   ", paste(chunk, collapse = "  ")), f)
+    }
     writeLines(";", f)
+    writeLines("", f)
+
+    # Arcs + capacities
     writeLines("param: ARCS: cap :=", f)
-    for (k in seq_len(nrow(all_arcs)))
-        writeLines(sprintf("  %-8s %-8s %.6f",
-            all_arcs$from[k], all_arcs$to[k], all_arcs$cap[k]), f)
+    for (k in seq_len(nrow(all_arcs))) {
+        writeLines(sprintf("    %-8s %-8s  %.6f", all_arcs$from[k], all_arcs$to[k], all_arcs$cap[k]), f)
+    }
     writeLines(";", f)
+
+    cat(sprintf("Written %s: %d nodes, %d arcs\n", outfile, length(all_nodes), nrow(all_arcs)))
 }
 ```
 
@@ -164,64 +229,110 @@ We solve both models at budget levels $B = 5, 8, 10, 13, 16, 20$, sweeping $\tau
 
 **Code**
 
-Model A — binary propagation MILP:
+Model A — binary propagation MILP (.mod):
 
 ```ampl
-set CELLS;
-set IGNITION within CELLS;
-set TARGETS within CELLS;
-set EDGES within {CELLS, CELLS};
+# Step 2 — Model A: Binary propagation firebreak MILP
+# Minimise weighted damage to targets by clearing at most B
+# cells. Fire propagates deterministically along edges whose
+# p_burn exceeds threshold τ (filtered inside the model).
 
-param weight {TARGETS};
-param p_burn {EDGES};
-param B >= 0, default 13;
-param tau default 0;
+set CELLS;                              # all vegetated cells ("r_c")
+set IGNITION within CELLS;              # row-21 cells that start on fire
+set TARGETS  within CELLS;              # settlement + wetland cells
+set EDGES    within {CELLS, CELLS};     # all directed spread edges
 
-var clear {CELLS} binary;
-var burn {CELLS} binary;
+param weight {TARGETS};                 # damage weight per target
+param p_burn {EDGES};                   # spread probability
+param B      >= 0, default 13;          # clearing budget
+param tau    default 0;                 # edge activation threshold
+
+var clear {CELLS} binary;               # 1 if cell is cleared
+var burn  {CELLS} binary;               # 1 if cell burns
 
 minimize Total_Damage:
     sum {t in TARGETS} weight[t] * burn[t];
 
+
+# 1. Budget: clear at most B cells
 subject to Budget:
     sum {v in CELLS} clear[v] <= B;
+
+# 2. Ignition: row-21 cells always burn, never cleared
 subject to Ignition_Burns {u in IGNITION}:
     burn[u] = 1;
+
+subject to Ignition_NoClear {u in IGNITION}:
+    clear[u] = 0;
+
+# 3. Targets: cannot be cleared (they must be protected by blocking fire earlier)
+subject to Target_NoClear {t in TARGETS}:
+    clear[t] = 0;
+
+# 4. A cleared cell cannot burn
 subject to Clear_Blocks {v in CELLS}:
     burn[v] <= 1 - clear[v];
-subject to Propagation {(u,v) in EDGES: p_burn[u,v] > tau}:
+
+# 5. Binary propagation: if u burns and v is not cleared, v burns
+#    Only active edges (p_burn > τ) generate constraints.
+#    burn[v] >= burn[u] - clear[v]   for each active edge (u,v)
+subject to Propagation {(u, v) in EDGES: p_burn[u,v] > tau}:
     burn[v] >= burn[u] - clear[v];
 ```
 
-Model B — continuous reachability MILP (key differences only):
+Model B — continuous reachability MILP (.mod, key differences from Model A):
 
 ```ampl
-param alpha default 0.5;
+# Model B key differences from Model A:
+
+param alpha  default 0.5;              # compression exponent (< 1)
+
+# Derived parameter: compressed edge weight
 param w {(u,v) in EDGES} = p_burn[u,v] ^ alpha;
 
-var x {CELLS} >= 0, <= 1;
+# Continuous fire reachability instead of binary burn
+var x     {CELLS} >= 0, <= 1;
 
+# Objective: minimise total weighted reachability
 minimize Total_Damage:
     sum {t in TARGETS} weight[t] * x[t];
 
-subject to Propagation {(u,v) in EDGES}:
+# Ignition: row-21 cells have full reachability
+subject to Ignition_Reach {u in IGNITION}:
+    x[u] = 1;
+
+# A cleared cell has zero reachability
+subject to Clear_Blocks {v in CELLS}:
+    x[v] <= 1 - clear[v];
+
+# Continuous propagation: reachability flows multiplicatively
+#    x[v] >= w[u,v] * x[u] - clear[v]
+#
+#    If v not cleared (clear[v]=0): x[v] >= w * x[u]
+#    If v cleared     (clear[v]=1): x[v] >= w * x[u] - 1
+#                                   which is non-binding since x >= 0
+subject to Propagation {(u, v) in EDGES}:
     x[v] >= w[u,v] * x[u] - clear[v];
 ```
 
-Both .run scripts use Gurobi with `mipgap=0.01 timelim=120`, then output objective, cleared cells, and damaged targets in CSV format. Model A outputs `burn[t]`; Model B outputs `x[t]`.
+Both .run scripts set Gurobi as solver with `mipgap=0.01 timelim=120`, then output `SUMMARY,<damage>,<status>`, `CLEARED,<cell>`, and `DAMAGED,<cell>,<weight>,<value>` in CSV format. Model A outputs `burn[t]`; Model B outputs `x[t]`.
 
-R function to generate the shared .dat file:
+R function to generate the shared AMPL .dat file for both models:
 
 ```r
 #' Generate AMPL .dat file for Step 2 firebreak MILP
 #'
-#' @param edges_df  Data frame from spread_probabilities()
-#' @param targets   Data frame with row, col, weight columns
+#' @param edges_df  Data frame from spread_probabilities() with columns:
+#'                  from_row, from_col, to_row, to_col, p_burn
+#' @param targets   Data frame from targets.csv with columns: row, col, weight
 #' @param outfile   Path to write the .dat file
 #' @param landscape Integer matrix (21x21) of vegetation codes
-#' @return Invisible NULL. Writes .dat file to disk.
+#'
+#' @return Invisible NULL. Called for side effect of writing the .dat file.
 generate_step2_dat = function(edges_df, targets, outfile, landscape) {
+
   node_name = function(r, c) paste0(r, "_", c)
+
   nr = nrow(landscape)
   nc = ncol(landscape)
 
@@ -251,6 +362,7 @@ generate_step2_dat = function(edges_df, targets, outfile, landscape) {
   edge_from = node_name(edges_df$from_row, edges_df$from_col)
   edge_to   = node_name(edges_df$to_row,   edges_df$to_col)
   keep      = (edge_from %in% cells) & (edge_to %in% cells)
+
   edge_from = edge_from[keep]
   edge_to   = edge_to[keep]
   p_burn    = edges_df$p_burn[keep]
@@ -258,124 +370,371 @@ generate_step2_dat = function(edges_df, targets, outfile, landscape) {
   # --- 5. Write .dat file ----
   con = file(outfile, open = "w")
   on.exit(close(con))
+
   wl = function(...) writeLines(paste0(...), con)
 
+  # set CELLS
   wl("set CELLS :=")
   wl("  ", paste(cells, collapse = " "))
   wl(";")
   wl("")
+
+  # set IGNITION
   wl("set IGNITION :=")
   wl("  ", paste(ignition, collapse = " "))
   wl(";")
   wl("")
+
+  # set TARGETS + param weight
   wl("param: TARGETS: weight :=")
   for (i in seq_along(target_nodes)) {
     wl("  ", target_nodes[i], "  ", target_weight[i])
   }
   wl(";")
   wl("")
+
+  # set EDGES + param p_burn
   wl("param: EDGES: p_burn :=")
   for (i in seq_along(edge_from)) {
-    wl("  ", edge_from[i], "  ", edge_to[i], "  ",
-       format(p_burn[i], digits = 8))
+    wl("  ", edge_from[i], "  ", edge_to[i], "  ", format(p_burn[i], digits = 8))
   }
   wl(";")
+
+  cat(sprintf("Wrote %s: %d cells, %d ignition, %d targets, %d edges\n",
+              outfile, length(cells), length(ignition),
+              length(target_nodes), length(edge_from)))
 }
 ```
 
 R function to call AMPL for one (model, B, param) combination:
 
 ```r
-#' Run a single AMPL firebreak solve for either model
+#' Run a single AMPL firebreak solve
 #'
 #' @param model      Character "A" or "B"
 #' @param B          Integer budget
 #' @param param_name Character "tau" or "alpha"
-#' @param param_val  Numeric parameter value
-#' @return One-row data frame with damage, cleared cells, status
+#' @param param_val  Numeric value for the swept parameter
+#'
+#' @return A one-row data frame with columns: model, B, param_name,
+#'   param_value, damage, n_cleared, cleared_cells, status
 run_one = function(model, B, param_name, param_val) {
+  mod_file = sprintf("step2_model%s.mod", model)
+  run_file = sprintf("step2_model%s.run", model)
+
   tmp = tempfile(fileext = ".run")
-  writeLines(c(
+  lines = c(
     "reset;",
-    sprintf("model step2_model%s.mod;", model),
+    sprintf("model %s;", mod_file),
     "data step2.dat;",
     sprintf("let B := %d;", B),
     sprintf("let %s := %g;", param_name, param_val),
-    sprintf("include step2_model%s.run;", model)
-  ), tmp)
+    sprintf("include %s;", run_file)
+  )
+  writeLines(lines, tmp)
+
   output = system2(ampl_bin, tmp, stdout = TRUE, stderr = TRUE)
   unlink(tmp)
-  # Parse SUMMARY and CLEARED lines from output
+
+  # Parse SUMMARY line
   parts = strsplit(grep("^SUMMARY,", output, value = TRUE), ",")[[1]]
+  damage = as.numeric(parts[2])
+  status = as.integer(parts[3])
+
+  # Parse CLEARED lines
   cleared = sub("^CLEARED,", "", grep("^CLEARED,", output, value = TRUE))
-  data.frame(model = model, B = B, param_name = param_name,
-    param_value = param_val, damage = as.numeric(parts[2]),
-    n_cleared = length(cleared),
+
+  data.frame(
+    model        = model,
+    B            = B,
+    param_name   = param_name,
+    param_value  = param_val,
+    damage       = damage,
+    n_cleared    = length(cleared),
     cleared_cells = paste(cleared, collapse = ";"),
-    status = as.integer(parts[3]), stringsAsFactors = FALSE)
+    status       = status,
+    stringsAsFactors = FALSE
+  )
 }
 ```
 
 We sweep $B = 5, 8, 10, 13, 16, 20$ with $\tau = 0, 0.05, 0.10, 0.15, 0.20$ for Model A and $\alpha = 0.05, 0.1, 0.15, 0.2, 0.3$ for Model B. Marginal value is computed as $(\text{damage}(B) - \text{damage}(B+1)) / \Delta B$.
 
-R function to validate plans with fire simulation:
+R function to validate firebreak plans with fire simulation:
 
 ```r
 #' Run K fire simulations and return mean damage with 95% CI
 #'
-#' @param landscape  21x21 matrix (firebreaks applied as 0)
-#' @param ignition   Two-column matrix (row, col)
-#' @param targets    Data frame with row, col, weight
+#' @param landscape  21x21 matrix (firebreaks already applied as 0)
+#' @param ignition   Two-column matrix (row, col) of ignition cells
+#' @param targets    Data frame with row, col, weight columns
 #' @param K          Number of replications
+#'
 #' @return Named list: mean_damage, se, ci_lo, ci_hi
 run_simulation = function(landscape, ignition, targets, K) {
   damages = numeric(K)
   for (k in seq_len(K)) {
-    result = simulate_fire(landscape, ignition,
-                           wind_speed = 0, wind_dir = 0)
+    result    = simulate_fire(landscape, ignition,
+                                wind_speed = 0, wind_dir = 0)
     damages[k] = compute_damage(result$burned, targets)
   }
   mu = mean(damages)
   se = sd(damages) / sqrt(K)
-  list(mean_damage = mu, se = se,
-       ci_lo = mu - 1.96 * se, ci_hi = mu + 1.96 * se)
+  list(mean_damage = mu,
+       se         = se,
+       ci_lo      = mu - 1.96 * se,
+       ci_hi      = mu + 1.96 * se)
 }
 ```
 
 **Results**
 
-We solved both models across all budget levels and validated the optimal plans with 1000 fire simulations (no wind, southern front ignition).
+We solved both models across all budget levels and validated each optimal plan with K = 1000 fire simulations (no wind, southern-front ignition, `set.seed(1)`).
 
-Model A shows a sharp threshold effect: at $\tau \leq 0.10$, fire deterministically reaches all targets (damage = 240); at $\tau \geq 0.105$, no fire reaches any target (damage = 0). The only interesting case is $\tau = 0$, $B = 13$, where the model places all 13 firebreaks to protect settlement (column 15 wall + row 7 seal), sacrificing wetland entirely (damage = 80).
+Model A exhibits a sharp threshold effect. At $\tau \leq 0.10$, every edge is active and fire deterministically reaches all targets (damage = 240); at $\tau \geq 0.105$, enough edges are filtered out that no fire reaches any target (damage = 0). The only useful case is $\tau = 0$ with $B = 13$, where the model places all 13 firebreaks along column 15 and row 7 to protect settlement, sacrificing wetland entirely (MILP damage = 80, simulated damage = 4.8).
 
 Model B produces a smooth budget-damage curve. At $\alpha = 0.1$:
 
 | Budget B | MILP damage | Sim. mean (K=1000) | 95% CI |
 |----------|-------------|---------------------|--------|
-| 0 (baseline) | — | 17.4 | [16.1, 18.7] |
-| 5 | 38.2 | 10.7 | [8.5, 12.9] |
-| 13 | 14.1 | 4.6 | [4.0, 5.1] |
-| 16 | 12.0 | 2.7 | [1.9, 3.6] |
+| 0 (baseline) | — | 16.4 | [15.1, 17.7] |
+| 5 | 38.2 | 10.1 | [9.1, 11.1] |
+| 13 | 14.1 | 4.8 | [4.3, 5.4] |
+| 16 | 12.0 | 3.0 | [2.5, 3.4] |
 | 20 | 0 | 0 | [0, 0] |
-| Corridor (17) | — | 1.6 | [1.1, 2.0] |
+| Corridor (17) | — | 1.6 | [1.1, 2.1] |
 
 [INSERT: step2/step2_comparison.png]
 
-**Figure 2:** Left: Model B damage vs budget for different $\alpha$ values. Right: MILP predictions vs simulator mean with 95% CI. Bottom: firebreak location maps for the current corridor, Model A ($B=16$, $\tau=0$), and Model B ($B=16$, $\alpha=0.1$).
+**Figure 2:** Left: Model B damage vs budget for different $\alpha$ values. Centre: MILP predictions vs simulator mean with 95% CI. Right: firebreak location maps for the current corridor, Model A ($B=13$, $\tau=0$), and Model B ($B=13$, $\alpha=0.1$).
 
 **Discussion**
 
-Model A is all-or-nothing: at $\tau = 0$ fire reaches every cell deterministically, so small budgets cannot help. Only $B \geq 13$ forms a complete barrier. Model B provides gradual tradeoffs — at $B = 13$ both models agree on the same plan (column 15 + row 7, protecting settlement), but at $B = 16$ Model B also protects wetland while Model A does not. Diminishing returns set in past $B = 13$, suggesting 13 cells is the minimum meaningful investment.
+Model A is all-or-nothing because at $\tau = 0$ every edge is active, so the propagation constraint forces every reachable cell to burn with certainty. Partial barriers are useless — fire routes around them through any remaining active edge. Only a complete wall ($B \geq 13$ along column 15 + row 7) blocks all paths to the settlement. Model B provides smooth tradeoffs: at $B = 13$ both models agree on the same plan (protecting settlement), but at $B = 16$ Model B also protects wetland while Model A still uses only 13 cells. The marginal value of additional cells drops sharply past $B = 13$, confirming 13 as the minimum meaningful investment.
 
-Both models overestimate damage — Model A predicts 80 but the simulator shows 4.6 for the same $B = 13$ plan. Yet the plan itself works well: the firebreak locations are in the right places. This shows a model can predict poorly but still produce a good plan. The parameter $\alpha$ requires experimentation: $\alpha = 0.5$ causes reachability to vanish over 15+ hops, while $\alpha = 0.1$ gives useful signal. The corridor (17 cells) achieves damage 1.6, slightly better than Model B at $B = 16$ (damage 2.7) but uses more cells.
+Both models overestimate damage compared to the simulator — for instance, Model A predicts damage 80 at $B = 13$ but the simulator shows 4.8. The gap arises because the deterministic MILP treats every active edge as certain to propagate fire: if any burning neighbour has an active edge to cell $v$, then $v$ must burn. In practice, each edge only fires with probability $p_{\text{burn}}$, so most paths through the grid never fully activate in a single simulation run. The MILP therefore sees the worst-case superposition of all possible fire paths, while the simulator draws one stochastic realisation at a time. Despite this, the MILP plan is effective: the optimiser correctly identifies where fire pressure is highest, and the resulting firebreak locations block the critical corridors even though the predicted damage is far too high. This is a useful property — the model overpredicts damage but still produces a good plan, because the objective function ranks plans correctly even if the absolute values are wrong.
 
-These plans are optimised for no wind and southern ignition. Under different conditions the optimal locations could shift — west wind would push fire toward settlement faster. This is addressed in Step 3. If settlement and wetland had equal weights, the plan would split resources across both targets rather than concentrating on one side.
+The parameter $\alpha$ requires experimentation: $\alpha = 0.5$ causes reachability to decay below solver tolerance over 15+ hops, while $\alpha = 0.1$ maintains useful signal across the full grid. The current corridor (17 cells) achieves mean damage 1.6, outperforming Model B at $B = 16$ (damage 3.0) but using one more cell.
+
+These plans are optimised for no-wind, southern-front ignition. Under wind, the optimal firebreak locations would shift — for example, westerly wind would push fire toward the settlement faster, potentially requiring a wider barrier on that side. Step 3 evaluates plan robustness under uncertain wind conditions.
 
 ---
 
 ### Step 3: Evaluation Under Uncertain Wind
 
-(todo)
+**Model**
+
+We evaluate the proposed plan ($B = 13$) under stochastic wind and random ignition. Wind speed $V \sim \text{Weibull}(k=2, A=7)$, sampled via inverse transform. Wind direction follows a mixture of two von Mises:
+
+$$f_\Theta(\theta) = 0.7 \cdot \frac{e^{3\cos(\theta - 1.5\pi)}}{2\pi\, I_0(3)} + 0.3 \cdot \frac{e^{2\cos(\theta - 0.75\pi)}}{2\pi\, I_0(2)}$$
+
+The dominant mode ($\mu_1 = 1.5\pi$, westerly) pushes fire toward the settlement; the secondary mode ($\mu_2 = 0.75\pi$, south-easterly) toward the wetland. The von Mises CDF has no closed form, so we use acceptance-rejection with Uniform$(0, 2\pi)$ proposal, envelope $M = \max_\theta f_\Theta(\theta)$, and acceptance condition $U < f_\Theta(\theta)/M$.
+
+Each of $N$ scenarios samples $(V, \Theta, \text{ignition})$, runs the simulator, and records damage. Three plans share the same draws (common random numbers). We report $\mathbb{E}[D]$ with 95% CI and $\text{CVaR}_{0.9} = \mathbb{E}[D \mid D \geq q_{0.9}]$ with bootstrap CI.
+
+**Code**
+
+Three files implement the Monte Carlo evaluation: `step3_samplers.R`, `step3_monte_carlo.R`, and `step3_run.R`. The functions `simulate_fire()`, `set_firebreaks()`, and `compute_damage()` are from the provided course resource `fire-simulator.r`, used unchanged.
+
+Samplers (step3_samplers.R):
+
+```r
+#' Target density: mixture of two von Mises
+#'
+#' @param theta Numeric vector of angles in [0, 2pi).
+#' @return Numeric vector of density values.
+dwind_dir = function(theta) {
+  p1  = 0.7;   mu1 = 1.5 * pi;  kappa1 = 3
+  p2  = 0.3;   mu2 = 0.75 * pi; kappa2 = 2
+
+  vm1 = exp(kappa1 * cos(theta - mu1)) / (2 * pi * besselI(kappa1, nu = 0))
+  vm2 = exp(kappa2 * cos(theta - mu2)) / (2 * pi * besselI(kappa2, nu = 0))
+
+  p1 * vm1 + p2 * vm2
+}
+
+#' Acceptance-rejection sampler for wind direction
+#'
+#' @param n Integer, number of samples.
+#' @return Named list: samples, acceptance_rate, theoretical_rate, M.
+sample_wind_dir = function(n) {
+  opt = optimise(dwind_dir, interval = c(0, 2 * pi), maximum = TRUE)
+  M   = opt$objective
+
+  samples      = numeric(n)
+  n_accepted   = 0L
+  n_total      = 0L
+  total_accept = 0L
+
+  while (n_accepted < n) {
+    batch_size = max(n - n_accepted, 256L)
+    theta = runif(batch_size, min = 0, max = 2 * pi)
+    u     = runif(batch_size)
+
+    accept       = u < dwind_dir(theta) / M
+    n_total      = n_total + batch_size
+    n_new        = sum(accept)
+    total_accept = total_accept + n_new
+    if (n_new == 0L) next
+
+    n_take = min(n_new, n - n_accepted)
+    samples[(n_accepted + 1):(n_accepted + n_take)] = theta[accept][1:n_take]
+    n_accepted = n_accepted + n_take
+  }
+
+  list(samples = samples, acceptance_rate = total_accept / n_total,
+       theoretical_rate = 1 / (2 * pi * M), M = M)
+}
+
+#' Sample wind speeds from Weibull(shape=2, scale=7)
+#'
+#' @param n Integer, number of samples.
+#' @return Numeric vector of wind speeds in km/h.
+sample_wind_speed = function(n) {
+  rweibull(n, shape = 2, scale = 7)
+}
+
+
+#' Sample random ignition locations from vegetated cells
+#'
+#' @param landscape Integer matrix (21x21). Zero = bare ground.
+#' @param n Integer, number of ignition locations.
+#' @return n x 2 integer matrix with columns row and col.
+sample_ignition = function(landscape, n) {
+  veg_idx = which(landscape != 0, arr.ind = TRUE)
+  chosen  = veg_idx[sample(nrow(veg_idx), size = n, replace = TRUE), , drop = FALSE]
+  colnames(chosen) = c("row", "col")
+  chosen
+}
+```
+
+Monte Carlo evaluation (step3_monte_carlo.R):
+
+```r
+#' Evaluate firebreak plans under N shared scenarios (CRN)
+#'
+#' @param landscape Integer matrix (21x21).
+#' @param targets Data frame with row, col, weight.
+#' @param N Number of scenarios.
+#' @param plans Named list: NULL or n x 2 matrix (row, col).
+#' @return Named list of data frames per plan.
+run_mc_evaluation = function(landscape, targets, N, plans) {
+  wind_dir   = sample_wind_dir(N)$samples
+  wind_speed = sample_wind_speed(N)
+  ignition   = sample_ignition(landscape, N)
+
+  results = list()
+  for (plan_name in names(plans)) {
+    ls_plan = landscape
+    breaks  = plans[[plan_name]]
+    if (!is.null(breaks)) ls_plan = set_firebreaks(ls_plan, breaks)
+
+    damages = numeric(N)
+    for (i in seq_len(N)) {
+      ir = ignition[i, "row"]; ic = ignition[i, "col"]
+      if (ls_plan[ir, ic] == 0) {
+        damages[i] = 0
+      } else {
+        result     = simulate_fire(ls_plan, ignition[i, , drop = FALSE],
+                                   wind_speed[i], wind_dir[i])
+        damages[i] = compute_damage(result$burned, targets)
+      }
+    }
+    results[[plan_name]] = data.frame(
+      scenario = seq_len(N), damage = damages,
+      wind_speed = wind_speed, wind_dir = wind_dir,
+      ign_row = ignition[, "row"], ign_col = ignition[, "col"])
+  }
+  results
+}
+```
+
+Risk measures (step3_monte_carlo.R):
+
+```r
+#' Compute E[damage] with 95% CI and CVaR with bootstrap CI
+#'
+#' @param damages Numeric vector of simulated damages.
+#' @param alpha CVaR level (default 0.9 = worst 10%).
+#' @param n_boot Bootstrap replicates for CVaR CI.
+#' @return Data frame: measure, estimate, ci_lower, ci_upper.
+compute_risk_measures = function(damages, alpha = 0.9, n_boot = 2000) {
+  n     = length(damages)
+  mu    = mean(damages)
+  se_mu = sd(damages) / sqrt(n)
+  ci_mu = mu + c(-1, 1) * qnorm(0.975) * se_mu
+
+  cvar_point = function(x) {
+    threshold = quantile(x, probs = alpha)
+    mean(x[x >= threshold])
+  }
+  cvar_est  = cvar_point(damages)
+  boot_cvar = replicate(n_boot, {
+    cvar_point(damages[sample.int(n, replace = TRUE)])
+  })
+  ci_cvar = quantile(boot_cvar, probs = c(0.025, 0.975))
+
+  data.frame(
+    measure  = c("mean_damage", paste0("CVaR_", alpha)),
+    estimate = c(mu, cvar_est),
+    ci_lower = c(ci_mu[1], ci_cvar[[1]]),
+    ci_upper = c(ci_mu[2], ci_cvar[[2]]))
+}
+```
+
+Setup and plan definitions (step3_run.R):
+
+```r
+set.seed(1)
+N = 5000
+
+## Proposed plan: Step 2 Model B, B=13, alpha=0.1
+proposed = matrix(c(
+  1,15, 2,15, 3,15, 4,15, 5,15, 6,15, 7,15,
+  7,16, 7,17, 7,18, 7,19, 7,20, 7,21
+), byrow = TRUE, ncol = 2)
+colnames(proposed) = c("row", "col")
+
+corridor = cbind(row = rep(10L, 17), col = 3L:19L)
+
+plans = list(baseline = NULL, corridor = corridor, proposed = proposed)
+```
+
+**Results**
+
+The sampler achieves $M = 0.464$, acceptance rate 34.0% (theoretical $1/(2\pi M) = 34.3\%$). KS test $p = 0.95$ (Figure 3).
+
+[INSERT: figures/fig1_sampler_validation.png]
+
+**Figure 3:** Wind direction samples vs mixture density (left); wind speed samples vs Weibull(2, 7) (right).
+
+$N = 5{,}000$ scenarios (`set.seed(1)`):
+
+| Plan | Cells | $\mathbb{E}[D]$ | 95% CI | $\text{CVaR}_{0.9}$ | 95% CI |
+|------|-------|---------|--------|----------|--------|
+| No firebreaks | 0 | 13.77 | [13.19, 14.35] | 58.94 | [57.48, 66.21] |
+| Corridor | 17 | 4.10 | [3.77, 4.42] | 23.83 | [22.61, 34.28] |
+| Proposed | 13 | 4.35 | [4.08, 4.61] | 26.38 | [25.31, 27.50] |
+
+[INSERT: figures/fig2_damage_densities.png]
+
+**Figure 4:** Damage distributions. Dashed = mean, solid = $\text{CVaR}_{0.9}$.
+
+[INSERT: figures/fig3_proposed_diagnostics.png]
+
+**Figure 5:** Proposed plan: damage vs wind speed by compass direction (left); mean damage by ignition cell (right).
+
+$N = 1{,}000$ pilot gave $\mathbb{E}[D] = 4.69$ vs 4.35, confirming stability.
+
+**Discussion**
+
+Both plans cut $\mathbb{E}[D]$ from 13.8 to ~4, but $\text{CVaR}_{0.9} \approx 25$ (6$\times$ the mean) reveals heavy tail risk. Corridor and proposed CIs overlap, so the difference is not significant — but proposed uses 4 fewer cells, giving better per-cell efficiency.
+
+The worst 10% are driven by ignition near targets (bypassing firebreaks) and westerly wind pushing fire toward the settlement (Figure 5). The plan handles westerly wind well since its firebreaks block settlement-bound paths, but leaves the wetland exposed to south-easterly wind.
+
+CVaR is a more informative criterion than $\mathbb{E}[D]$: the mean is diluted by many zero-damage scenarios where fire never reaches targets. A CVaR-aware design would place firebreaks closer to targets to guard against nearby ignitions.
+
+Step 2's MILP predicted damage 14.1; the stochastic mean is 4.35. The plan remains effective because the MILP identified the structurally important corridors, which wind does not fundamentally alter.
 
 ---
 
