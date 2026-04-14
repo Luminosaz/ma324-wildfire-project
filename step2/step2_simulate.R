@@ -12,7 +12,7 @@
 source("../.Rprofile")
 source("../../Project data and resources/fire-simulator.r")
 
-set.seed(324)
+set.seed(1)
 
 # --- Data ----------------------------------------------------
 data_dir  ="../../Project data and resources"
