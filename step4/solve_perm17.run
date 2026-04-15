@@ -1,0 +1,16 @@
+reset;
+model ../step2/step2_modelB.mod;
+data ../step2/step2.dat;
+let B := 17;
+let alpha := 0.1;
+
+option solver "/Users/jerrymac/Library/Python/3.9/lib/python/site-packages/ampl_module_gurobi/bin/gurobi";
+option gurobi_options 'mipgap=0.01 timelim=1800';
+
+solve;
+
+printf "SUMMARY,%f,%d\n", Total_Damage, solve_result_num;
+
+for {v in CELLS: clear[v] > 0.5} {
+    printf "CLEARED,%s\n", v;
+}
