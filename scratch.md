@@ -85,17 +85,39 @@
 ## Day 4 (2026-04-12) — Step 4 reactive
 
 ### Numbers
-- Pilot N=50, alpha=0.1, R=4, Gurobi timelim=120s mipgap=0.01
-  - none:      E=13.50, CVaR90=74.00
-  - perm_13:   E=3.50,  CVaR90=21.00
-  - perm_17:   E=2.60,  CVaR90=13.75
-  - reactive:  E=8.90,  CVaR90=39.38   ← 反常地高
-- Runtime N=50 ≈ 636s (~12s/solve). N=1000 ≈ 3.5 h.
-- Per-scenario diff (reactive − perm_13): mean +5.40, **median 0**
-  → 大多数 scenario reactive 不输,少数被 RNG 拉高
+
+**Main result (N=1000, per-scenario CRN seed=1000+i, timelim=120, mipgap=0.01, alpha=0.1):**
+
+| Plan | E[damage] ± 95% CI | CVaR₀.₉ |
+|---|---|---|
+| none | 14.27 ± 1.32 | 64.47 |
+| perm_13 (B=13) | 4.84 ± 0.60 | 28.45 |
+| perm_17 (B=17) | 3.54 ± 0.54 | 25.95 |
+| reactive (13+4) | 3.34 ± 0.53 | 19.90 |
+
+- reactive − perm_13: mean −1.49, median 0, P(r>p13) = 6.9%
+- reactive − perm_17: mean −0.21, median 0, P(r>p17) = 2.4%
+- reactive effort gap (perm_13 − reactive): mean +1.49, P(gap>0)=16.8%, P(gap<0)=6.9%
+- MIP gap: median 0.97%, max 8.2%, P(>1%)=0.9%
+- 960/969 solves optimal (status=0), 36 ignition-on-firebreak skipped
+- Runtime: ~8h total for N=1000 (~29s/scenario avg, some hit 120s timelim)
+
+**Permanent cell sets:**
+- perm_13: 1_15 2_15 3_15 4_15 5_15 6_15 7_15 7_16 7_17 7_18 7_19 7_20 7_21 (L-shape: col15 wall + row7 east)
+- perm_17: perm_13 + 11_4 11_5 11_6 15_5 (adds wetland-side protection)
+- perm_12: perm_13 minus 1_15 (drops northernmost cell of col15 wall)
+
+**B=17 MILP note:** 120s gave relmipgap=25%, but 1800s confirmed same incumbent is global optimal (obj=11.585). Gap = LP bound slow, not suboptimal solution.
+
+**Sensitivity (pending, running now):** R sweep {0,2,6,8} + (B=12,R=5), N=200 each.
 
 ### Discussion bullets
-- (fill in)
+- reactive ≈ perm_17 in mean (3.34 vs 3.54) but **reactive wins tail risk** (CVaR 19.90 vs 25.95)
+- reactive improves over perm_13 by 1.49 mean, 8.55 CVaR — value of 4 extra wind-aware cells
+- P(reactive > perm_13) = 6.9% residual — not pathwise coupling, but per-scenario seed greatly reduces noise vs Step 3 style CRN
+- MIP gap ≤1% in 99.1% of solves → Q3: solver quality not a concern
+- 36/1000 scenarios ignition lands on perm_13 → damage=0 for plans 2-4 regardless
+- Per-scenario CRN does NOT create exact pathwise coupling (different layouts consume runif at different rates) — report must be honest about this
 
 ### 待问老师的问题（Step 4 邮件合集）
 

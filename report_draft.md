@@ -643,7 +643,122 @@ Step 2's MILP predicted damage 14.1; the stochastic mean is 4.34. The plan remai
 
 ### Step 4: Reactive Response
 
-(todo)
+**Model**
+
+Step 4 splits the combined budget $B + R = 17$ into two stages. The $B = 13$ permanent cells from Step 3 are fixed before the fire season. After wind conditions $(V, \Theta)$ are revealed — but before ignition — up to $R = 4$ additional cells may be cleared reactively.
+
+The reactive cells are chosen by a per-scenario MILP that extends Model B. The permanent cells enter as fixed data (set PERM), and the only decision variables are binary $z_v$ for each candidate cell:
+
+$$\min \sum_{t \in \text{TARGETS}} w_t \, x_t \quad \text{s.t.} \quad \sum_v z_v \le R$$
+
+with $w_{uv} = p_{\text{burn}}(u \to v;\, V, \Theta)^\alpha$ computed from the revealed wind using `spread_probabilities()`. The propagation and blocking constraints from Model B apply with $\text{clear}[v]$ replaced by $\text{perm}[v] + z[v]$; edges involving permanent cells are filtered out. The compression exponent $\alpha = 0.1$ is unchanged from Step 2.
+
+The true ignition location is unknown at both stages. Following the brief, the reactive MILP uses a southern-front proxy: all row-21 cells have $x_u = 1$, consistent with Step 2. This is conservative; Q6 discusses its limitations.
+
+We compare four plans under the same $N = 1000$ scenarios sampled with `set.seed(1)`: (1) no firebreaks, (2) $B = 13$ permanent only, (3) $B + R = 17$ all-permanent, and (4) $B = 13$ permanent + $R = 4$ reactive. Within each scenario, `set.seed(1000 + i)` aligns the simulator's starting RNG state across plans, reducing noise in per-scenario comparisons without creating exact pathwise coupling (different firebreak layouts consume `runif` at different rates).
+
+**Code**
+
+Step 4 extends Model B with a reactive MILP, a wind-aware `.dat` builder (`edges_wind.R`, `build_step4_dat.R`), and a shared-scenario batch evaluator. Samplers and risk measures from Step 3 are reused.
+
+Reactive MILP — Step 4 constraints beyond Model B (`step4_reactive.mod`):
+
+```
+set PERM within CELLS;
+param R >= 0;
+var react {CELLS} binary;
+
+check {u in IGNITION}: u not in PERM;
+check {t in TARGETS}:  t not in PERM;
+
+subject to Reactive_Budget:
+    sum {v in CELLS} react[v] <= R;
+subject to Ignition_NoReact {u in IGNITION}: react[u] = 0;
+subject to Target_NoReact {t in TARGETS}:    react[t] = 0;
+subject to Perm_Reach {v in PERM}:           x[v] = 0;
+subject to Perm_NoReact {v in PERM}:         react[v] = 0;
+subject to React_Blocks {v in CELLS diff PERM}:
+    x[v] <= 1 - react[v];
+subject to Propagation {(u,v) in EDGES: u not in PERM and v not in PERM}:
+    x[v] >= w[u,v] * x[u] - react[v];
+```
+
+The `.dat` builder (`build_step4_dat.R`) recomputes edge weights for the revealed wind via `spread_probabilities()` and writes PERM, $w$, and $R$ alongside the standard sets:
+
+```r
+wl("set PERM :=")
+wl("  ", paste(perm_nodes, collapse = " "))
+wl(";")
+
+wl("param: EDGES: w :=")
+for (i in seq_along(edge_from))
+  wl("  ", edge_from[i], "  ", edge_to[i], "  ", format(w_vals[i], digits = 8))
+wl(";")
+
+wl("param R := ", R, ";")
+```
+
+Evaluation loop — core of `evaluate_all_plans.R`, showing the shared-scenario paired comparison with per-scenario RNG alignment:
+
+```r
+for (i in seq_len(N)) {
+  sim_seed = 1000L + i
+
+  set.seed(sim_seed)
+  res1 = simulate_fire(land_none, ign, V, dir)
+  d1   = compute_damage(res1$burned, targets)       # plan 1: none
+
+  set.seed(sim_seed)
+  res2 = simulate_fire(land_13, ign, V, dir)
+  d2   = compute_damage(res2$burned, targets)       # plan 2: perm_13
+
+  set.seed(sim_seed)
+  res3 = simulate_fire(land_17, ign, V, dir)
+  d3   = compute_damage(res3$burned, targets)       # plan 3: perm_17
+
+  z    = solve_reactive(perm_13, V, dir, alpha, R)  # MILP: wind only
+  set.seed(sim_seed)
+  res4 = simulate_fire(set_firebreaks(land_13, z), ign, V, dir)
+  d4   = compute_damage(res4$burned, targets)       # plan 4: reactive
+}
+```
+
+Each scenario resets the simulator's RNG to `1000 + i` before each plan, aligning starting states without exact pathwise coupling. `solve_reactive` is conditioned on $(V, \Theta)$ and the permanent plan only; the realised ignition enters only in the subsequent simulator evaluation. For sensitivity, we reuse the same evaluator with alternative permanent plans and reactive budgets.
+
+**Results**
+
+We evaluate four plans on the same $N = 1{,}000$ scenarios (Table X). $N = 1{,}000$ balances precision against runtime: each scenario requires a reactive MILP solve, so Step 4's per-scenario cost is roughly two orders of magnitude larger than Step 3's simulator-only evaluation. At this $N$, point estimates are stably ordered, and the no-firebreak and $B = 13$ plans are clearly worse than the two 17-cell plans on both mean and tail risk. However, the two 17-cell plans overlap on both mean and CVaR intervals, and $B = 13$ still overlaps them on CVaR, so we do not claim a statistically resolved ordering from intervals alone.
+
+| Plan | $\mathbb{E}[D]$ (95% $t$-CI) | $\text{CVaR}_{0.9}$ (95% bootstrap CI) |
+|---|---|---|
+| No firebreaks | $14.27 \pm 1.32$ | $64.47\ [55.10,\ 69.25]$ |
+| $B = 13$ permanent | $4.84 \pm 0.60$ | $28.45\ [24.57,\ 30.55]$ |
+| $B + R = 17$ all-permanent | $3.54 \pm 0.54$ | $25.95\ [18.42,\ 28.37]$ |
+| $B = 13$ + reactive ($R = 4$) | $3.34 \pm 0.53$ | $19.90\ [17.75,\ 27.10]$ |
+
+The scenario-wise gap $D_{\text{perm\_13}} - D_{\text{reactive}}$ has mean $+1.49$; reactive strictly reduces damage in $16.8\%$ of scenarios and strictly increases it in $6.9\%$ (plans (2) and (4) share scenario-level RNG starting states but not exact pathwise realisations, so some drift is expected). Gurobi reached the $1\%$ target MIP gap on $960$ of $969$ reactive solves; median final gap was $0.97\%$. The remaining $31/1{,}000$ scenarios had ignition on a permanent firebreak, trivially giving zero damage.
+
+*Where reactive effort matters most.* Stratifying the gap by covariates (Table Y) gives a partial answer. Ignition location shows the clearest signal: for ignitions in rows 1–7 (near the targets) the mean gap is $0.37$ and $P(\text{gap} > 0) = 3.2\%$; in rows 8–14 the mean gap rises to $2.68$ ($P(\text{gap} > 0) = 22.3\%$); in rows 15–21 (near the MILP's southern-front proxy) the mean gap is $1.38$. Wind-speed terciles do not show a monotone trend (mean gaps $1.87 / 0.92 / 1.70$ from low to high), so the evidence does not support the claim that reactive matters most at extreme wind speeds. Against perm_17 specifically, the mean damage difference is essentially zero under westerly wind ($\Delta = 0.03$, $n = 714$) and larger under easterly wind ($\Delta = 0.65$, $n = 286$). These stratifications primarily reflect where the southern-front proxy aligns or misaligns with the realised fire geometry; they do not yet isolate a pure "marginal value of wind information" signal.
+
+*Reactive cell frequency* (Figure X). Four cells dominate: $(11, 4)$, $(11, 5)$, $(11, 6)$ are each selected in $> 96\%$ of scenarios and $(15, 5)$ in $73.7\%$ — exactly the four cells the no-wind MILP at $B = 17$ adds on top of $B = 13$. Of the $3{,}876$ total reactive selections, $99.6\%$ are closer (Chebyshev distance) to the wetland than to the settlement; $0\%$ are closer to the settlement.
+
+**Discussion**
+
+**Q1.** A fully optimal approach is a two-stage stochastic program with non-anticipative recourse. The second-stage policy is a function $z(V, \Theta)$ of the revealed wind only; ignition $I$ is unobserved at that stage. The outer problem is
+$$\min_{\text{perm},\ z(\cdot)}\ \mathbb{E}_{V,\Theta}\bigl[\ \mathbb{E}_{I}\bigl[\ D(\text{perm},\ z(V,\Theta);\ V, \Theta, I)\ \bigr]\ \bigr],$$
+i.e. the reactive policy cannot depend on $I$. In practice this requires scenario-based decomposition over a joint $(V, \Theta, I)$ distribution, which is computationally prohibitive on a $21 \times 21$ grid at a feasible wall-clock budget. Our Step 4 surrogate replaces the inner expectation over $I$ with a deterministic southern-front proxy and solves one MILP per sampled $(V, \Theta)$.
+
+**Q2.** In the underlying decision problem, access to realised wind weakly enlarges the policy class relative to committing all 17 cells ex ante. Under our surrogate implementation this does not guarantee exact simulator-level dominance in every sample, but the observed means are consistent with an average advantage for the reactive policy: $3.34$ vs $3.54$ for the mean and $19.90$ vs $25.95$ for $\text{CVaR}_{0.9}$. The mean advantage is driven primarily by the minority easterly-wind regime ($\Delta = 0.65$, $n = 286$); under the dominant westerly wind the two plans are essentially indistinguishable on average ($\Delta = 0.03$, $n = 714$). In $2.4\%$ of scenarios reactive exceeds perm_17 slightly; one plausible explanation is the ignition-proxy approximation (Q6); another is that the per-scenario seed aligns starting RNG states without creating exact pathwise coupling, so some scenario-level noise survives.
+
+**Q3.** Gurobi reached the $1\%$ target gap on $99.1\%$ of reactive solves, so the optimality gap does not materially affect the reactive cell choices in our sample. Separately, the $B = 17$ all-permanent MILP reported a $25\%$ gap at the $120$ s limit, but a re-solve at $1{,}800$ s confirmed the same incumbent is globally optimal. A large reported gap here reflects a slow LP lower bound rather than a suboptimal incumbent.
+
+**Q4.** The reactive MILP concentrates its four cells on $(11,4), (11,5), (11,6), (15,5)$ in most scenarios, matching the no-wind MILP's $B = 17$ additions to $B = 13$. Wind induces only small secondary shifts. This suggests the permanent plan leaves one specific structural gap on the wetland side that is almost always worth closing, rather than the reactive stage exploiting fine-grained wind-specific adjustments.
+
+**Q5.** The settlement weight (10) is twice the wetland weight (5), yet $99.6\%$ of reactive-cell selections are closer to the wetland. This is consistent with the permanent plan already saturating settlement protection: the $B = 13$ L-shape blocks the main northward corridor, and plan (2) produces essentially zero settlement damage in the simulator. The marginal damage reduction from additional settlement-side cells is therefore small, so reactive redirects $R = 4$ to the wetland. Under this reading, weight asymmetry is absorbed by the permanent plan rather than expressed in the reactive layer.
+
+**Q6.** The reactive MILP is conditioned on revealed wind $(V, \Theta)$ only; ignition $I$ is unobserved at the reactive stage, so the MILP requires a surrogate assumption about ignition. We follow Step 2 and use a southern-front proxy ($x_u = 1$ for all row-21 cells), which is one approximation among several (another would be an expectation over the uniform ignition distribution). The approximation is expected to degrade as the realised ignition moves away from row 21. The stratified gaps in Results are consistent with this: when ignition falls in the northern third (far from the proxy front), reactive rarely improves over perm_13 ($P(\text{gap} > 0) = 3.2\%$); in the middle rows (where a southward spread assumption still plausibly captures the dominant flow) the mean gap is largest ($2.68$). A deterministic alternative to the Monte Carlo evaluation (e.g. a coarse wind grid weighted by the mixture density) would improve reproducibility but would forfeit the bootstrap-based uncertainty quantification used here for CVaR and would replace the continuous stochastic model by a discretised approximation, so we retain Monte Carlo for the risk measures.
+
+**Q7.** Not reported in this version. The $(B = 12, R = 5)$ variant and the $R$-sensitivity sweep $R \in \{0, 2, 4, 6, 8\}$ are in progress; we will include them once `run_sensitivity.R` completes.
 
 ---
 
