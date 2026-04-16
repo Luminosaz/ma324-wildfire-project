@@ -232,258 +232,173 @@ We solve both models at budget levels $B = 5, 8, 10, 13, 16, 20$, sweeping $\tau
 Model A — binary propagation MILP (.mod):
 
 ```ampl
-# Step 2 — Model A: Binary propagation firebreak MILP
-# Minimise weighted damage to targets by clearing at most B
-# cells. Fire propagates deterministically along edges whose
-# p_burn exceeds threshold τ (filtered inside the model).
+set CELLS;
+set IGNITION within CELLS;
+set TARGETS  within CELLS;
+set EDGES    within {CELLS, CELLS};
 
-set CELLS;                              # all vegetated cells ("r_c")
-set IGNITION within CELLS;              # row-21 cells that start on fire
-set TARGETS  within CELLS;              # settlement + wetland cells
-set EDGES    within {CELLS, CELLS};     # all directed spread edges
+param weight {TARGETS};
+param p_burn {EDGES};
+param B      >= 0, default 13;
+param tau    default 0;
 
-param weight {TARGETS};                 # damage weight per target
-param p_burn {EDGES};                   # spread probability
-param B      >= 0, default 13;          # clearing budget
-param tau    default 0;                 # edge activation threshold
-
-var clear {CELLS} binary;               # 1 if cell is cleared
-var burn  {CELLS} binary;               # 1 if cell burns
+var clear {CELLS} binary;
+var burn  {CELLS} binary;
 
 minimize Total_Damage:
     sum {t in TARGETS} weight[t] * burn[t];
 
-
-# 1. Budget: clear at most B cells
 subject to Budget:
     sum {v in CELLS} clear[v] <= B;
 
-# 2. Ignition: row-21 cells always burn, never cleared
 subject to Ignition_Burns {u in IGNITION}:
     burn[u] = 1;
 
 subject to Ignition_NoClear {u in IGNITION}:
     clear[u] = 0;
 
-# 3. Targets: cannot be cleared (they must be protected by blocking fire earlier)
+# Targets cannot be cleared: they must be protected by blocking fire upstream.
 subject to Target_NoClear {t in TARGETS}:
     clear[t] = 0;
 
-# 4. A cleared cell cannot burn
 subject to Clear_Blocks {v in CELLS}:
     burn[v] <= 1 - clear[v];
 
-# 5. Binary propagation: if u burns and v is not cleared, v burns
-#    Only active edges (p_burn > τ) generate constraints.
-#    burn[v] >= burn[u] - clear[v]   for each active edge (u,v)
+# Only edges with p_burn > tau propagate fire (thresholded propagation).
 subject to Propagation {(u, v) in EDGES: p_burn[u,v] > tau}:
     burn[v] >= burn[u] - clear[v];
 ```
 
-Model B — continuous reachability MILP (.mod, key differences from Model A):
+Model B shares the same sets, budget, ignition, and target constraints as Model A. The differences are: `burn` is replaced by a continuous reachability `x` ∈ [0,1], edge weights are compressed as `w = p_burn^alpha` to prevent decay over many hops, and propagation is multiplicative rather than binary.
 
 ```ampl
-# Model B key differences from Model A:
-
-param alpha  default 0.5;              # compression exponent (< 1)
-
-# Derived parameter: compressed edge weight
+param alpha default 0.5;
 param w {(u,v) in EDGES} = p_burn[u,v] ^ alpha;
 
-# Continuous fire reachability instead of binary burn
-var x     {CELLS} >= 0, <= 1;
+var x {CELLS} >= 0, <= 1;
 
-# Objective: minimise total weighted reachability
 minimize Total_Damage:
     sum {t in TARGETS} weight[t] * x[t];
 
-# Ignition: row-21 cells have full reachability
 subject to Ignition_Reach {u in IGNITION}:
     x[u] = 1;
 
-# A cleared cell has zero reachability
 subject to Clear_Blocks {v in CELLS}:
     x[v] <= 1 - clear[v];
 
-# Continuous propagation: reachability flows multiplicatively
-#    x[v] >= w[u,v] * x[u] - clear[v]
-#
-#    If v not cleared (clear[v]=0): x[v] >= w * x[u]
-#    If v cleared     (clear[v]=1): x[v] >= w * x[u] - 1
-#                                   which is non-binding since x >= 0
 subject to Propagation {(u, v) in EDGES}:
     x[v] >= w[u,v] * x[u] - clear[v];
 ```
 
-Both .run scripts set Gurobi as solver with `mipgap=0.01 timelim=120`, then output `SUMMARY,<damage>,<status>`, `CLEARED,<cell>`, and `DAMAGED,<cell>,<weight>,<value>` in CSV format. Model A outputs `burn[t]`; Model B outputs `x[t]`.
+Both models share a single `.run` skeleton:
 
-R function to generate the shared AMPL .dat file for both models:
+```ampl
+option solver gurobi;
+option gurobi_options 'mipgap=0.01 timelim=120';
+solve;
+
+printf "SUMMARY,%f,%d\n", Total_Damage, solve_result_num;
+for {v in CELLS: clear[v] > 0.5} printf "CLEARED,%s\n", v;
+for {t in TARGETS: burn[t]  > 0.5} printf "DAMAGED,%s,%d,%f\n", t, weight[t], burn[t];
+```
+
+The Model B `.run` is identical except the damaged-target filter uses `x[t] > 0.01` instead of `burn[t] > 0.5`.
+
+The shared `.dat` file is generated in R from the landscape matrix, the edge list returned by `spread_probabilities()` (Step 1), and `targets.csv`. The mapping is:
 
 ```r
-#' Generate AMPL .dat file for Step 2 firebreak MILP
+#' Build AMPL .dat sets/params from Step-1 edge data and landscape matrix.
 #'
-#' @param edges_df  Data frame from spread_probabilities() with columns:
-#'                  from_row, from_col, to_row, to_col, p_burn
-#' @param targets   Data frame from targets.csv with columns: row, col, weight
-#' @param outfile   Path to write the .dat file
-#' @param landscape Integer matrix (21x21) of vegetation codes
-#'
-#' @return Invisible NULL. Called for side effect of writing the .dat file.
-generate_step2_dat = function(edges_df, targets, outfile, landscape) {
+#' @param edges_df  from spread_probabilities(): from_row, from_col, to_row, to_col, p_burn
+#' @param targets   data frame: row, col, weight
+#' @param landscape 21x21 integer matrix (0 = bare, non-zero = vegetated)
+#' @return list with CELLS, IGNITION, TARGETS (+ weight), EDGES (+ p_burn);
+#'   a thin writer then serialises each field as an AMPL set/param block.
+generate_step2_dat = function(edges_df, targets, landscape) {
+  node = function(r, c) paste0(r, "_", c)
+  nr   = nrow(landscape)
 
-  node_name = function(r, c) paste0(r, "_", c)
+  veg      = which(landscape != 0, arr.ind = TRUE)
+  CELLS    = node(veg[, "row"], veg[, "col"])
+  IGNITION = CELLS[veg[, "row"] == nr]                         # row 21
 
-  nr = nrow(landscape)
-  nc = ncol(landscape)
+  TARGETS = data.frame(cell   = node(targets$row, targets$col),
+                       weight = targets$weight)
 
-  # --- 1. set CELLS: all vegetated (non-bare) cells ----
-  cells = c()
-  for (r in 1:nr) {
-    for (c in 1:nc) {
-      if (landscape[r, c] != 0) {
-        cells = c(cells, node_name(r, c))
-      }
-    }
-  }
+  EDGES = data.frame(from   = node(edges_df$from_row, edges_df$from_col),
+                     to     = node(edges_df$to_row,   edges_df$to_col),
+                     p_burn = edges_df$p_burn)
+  EDGES = EDGES[EDGES$from %in% CELLS & EDGES$to %in% CELLS, ]
 
-  # --- 2. set IGNITION: vegetated cells in row 21 ----
-  ignition = c()
-  for (c in 1:nc) {
-    if (landscape[nr, c] != 0) {
-      ignition = c(ignition, node_name(nr, c))
-    }
-  }
-
-  # --- 3. set TARGETS + param weight ----
-  target_nodes  = node_name(targets$row, targets$col)
-  target_weight = targets$weight
-
-  # --- 4. set EDGES + param p_burn ----
-  edge_from = node_name(edges_df$from_row, edges_df$from_col)
-  edge_to   = node_name(edges_df$to_row,   edges_df$to_col)
-  keep      = (edge_from %in% cells) & (edge_to %in% cells)
-
-  edge_from = edge_from[keep]
-  edge_to   = edge_to[keep]
-  p_burn    = edges_df$p_burn[keep]
-
-  # --- 5. Write .dat file ----
-  con = file(outfile, open = "w")
-  on.exit(close(con))
-
-  wl = function(...) writeLines(paste0(...), con)
-
-  # set CELLS
-  wl("set CELLS :=")
-  wl("  ", paste(cells, collapse = " "))
-  wl(";")
-  wl("")
-
-  # set IGNITION
-  wl("set IGNITION :=")
-  wl("  ", paste(ignition, collapse = " "))
-  wl(";")
-  wl("")
-
-  # set TARGETS + param weight
-  wl("param: TARGETS: weight :=")
-  for (i in seq_along(target_nodes)) {
-    wl("  ", target_nodes[i], "  ", target_weight[i])
-  }
-  wl(";")
-  wl("")
-
-  # set EDGES + param p_burn
-  wl("param: EDGES: p_burn :=")
-  for (i in seq_along(edge_from)) {
-    wl("  ", edge_from[i], "  ", edge_to[i], "  ", format(p_burn[i], digits = 8))
-  }
-  wl(";")
-
-  cat(sprintf("Wrote %s: %d cells, %d ignition, %d targets, %d edges\n",
-              outfile, length(cells), length(ignition),
-              length(target_nodes), length(edge_from)))
+  list(CELLS = CELLS, IGNITION = IGNITION, TARGETS = TARGETS, EDGES = EDGES)
 }
 ```
 
-R function to call AMPL for one (model, B, param) combination:
+Each field in that list is serialised to the shared `.dat` file as a single AMPL block, e.g. for `CELLS` and the `EDGES + p_burn` combined table:
 
 ```r
-#' Run a single AMPL firebreak solve
-#'
-#' @param model      Character "A" or "B"
-#' @param B          Integer budget
-#' @param param_name Character "tau" or "alpha"
-#' @param param_val  Numeric value for the swept parameter
-#'
-#' @return A one-row data frame with columns: model, B, param_name,
-#'   param_value, damage, n_cleared, cleared_cells, status
-run_one = function(model, B, param_name, param_val) {
-  mod_file = sprintf("step2_model%s.mod", model)
-  run_file = sprintf("step2_model%s.run", model)
+writeLines(c("set CELLS :=", paste(" ", CELLS, collapse = ""), ";"), con)
+writeLines("param: EDGES: p_burn :=", con)
+writeLines(sprintf("  %s  %s  %.8f", EDGES$from, EDGES$to, EDGES$p_burn), con)
+writeLines(";", con)
+```
 
+`IGNITION` and `TARGETS + weight` follow the same pattern (`set` block and `param:` block respectively).
+
+The AMPL solve is driven from R, writing a small driver `.run` per call so `B` and the swept parameter (`tau` or `alpha`) can be set externally:
+
+```r
+#' Solve one (model, B, parameter) combination and parse the CSV output.
+#'
+#' @param model      "A" or "B"
+#' @param B          integer budget
+#' @param param_name "tau" or "alpha"
+#' @param param_val  numeric value for the swept parameter
+#' @return one-row data frame: model, B, param_name, param_value,
+#'   damage, n_cleared, cleared_cells, status
+run_one = function(model, B, param_name, param_val) {
   tmp = tempfile(fileext = ".run")
-  lines = c(
+  writeLines(c(
     "reset;",
-    sprintf("model %s;", mod_file),
+    sprintf("model step2_model%s.mod;", model),
     "data step2.dat;",
     sprintf("let B := %d;", B),
     sprintf("let %s := %g;", param_name, param_val),
-    sprintf("include %s;", run_file)
-  )
-  writeLines(lines, tmp)
+    sprintf("include step2_model%s.run;", model)
+  ), tmp)
 
   output = system2(ampl_bin, tmp, stdout = TRUE, stderr = TRUE)
-  unlink(tmp)
 
-  # Parse SUMMARY line
-  parts = strsplit(grep("^SUMMARY,", output, value = TRUE), ",")[[1]]
-  damage = as.numeric(parts[2])
-  status = as.integer(parts[3])
-
-  # Parse CLEARED lines
+  parts   = strsplit(grep("^SUMMARY,", output, value = TRUE), ",")[[1]]
   cleared = sub("^CLEARED,", "", grep("^CLEARED,", output, value = TRUE))
 
-  data.frame(
-    model        = model,
-    B            = B,
-    param_name   = param_name,
-    param_value  = param_val,
-    damage       = damage,
-    n_cleared    = length(cleared),
-    cleared_cells = paste(cleared, collapse = ";"),
-    status       = status,
-    stringsAsFactors = FALSE
-  )
+  data.frame(model = model, B = B,
+             param_name = param_name, param_value = param_val,
+             damage = as.numeric(parts[2]), n_cleared = length(cleared),
+             cleared_cells = paste(cleared, collapse = ";"),
+             status = as.integer(parts[3]))
 }
 ```
 
-We sweep $B = 5, 8, 10, 13, 16, 20$ with $\tau = 0, 0.05, 0.10, 0.15, 0.20$ for Model A and $\alpha = 0.05, 0.1, 0.15, 0.2, 0.3$ for Model B. Marginal value is computed as $(\text{damage}(B) - \text{damage}(B+1)) / \Delta B$.
+We sweep $B = 5, 8, 10, 13, 16, 20$ with $\tau = 0, 0.05, 0.10, 0.15, 0.20$ for Model A and $\alpha = 0.05, 0.1, 0.15, 0.2, 0.3$ for Model B. Marginal value is reported as $(\text{damage}(B_j) - \text{damage}(B_{j+1})) / (B_{j+1} - B_j)$ for consecutive budgets inside each sweep.
 
-R function to validate firebreak plans with fire simulation:
+Each optimal plan is validated by applying its cleared cells to the landscape and running $K = 1000$ replications of `simulate_fire()` (Step 3) under no-wind southern-front ignition. The baseline (no firebreaks) and current corridor (row 10, cols 3–19) are evaluated under the same protocol:
 
 ```r
-#' Run K fire simulations and return mean damage with 95% CI
+#' Mean weighted damage + 95% CI for one firebreak plan.
 #'
-#' @param landscape  21x21 matrix (firebreaks already applied as 0)
-#' @param ignition   Two-column matrix (row, col) of ignition cells
-#' @param targets    Data frame with row, col, weight columns
-#' @param K          Number of replications
-#'
-#' @return Named list: mean_damage, se, ci_lo, ci_hi
-run_simulation = function(landscape, ignition, targets, K) {
-  damages = numeric(K)
-  for (k in seq_len(K)) {
-    result    = simulate_fire(landscape, ignition,
-                                wind_speed = 0, wind_dir = 0)
-    damages[k] = compute_damage(result$burned, targets)
-  }
-  mu = mean(damages)
-  se = sd(damages) / sqrt(K)
-  list(mean_damage = mu,
-       se         = se,
-       ci_lo      = mu - 1.96 * se,
-       ci_hi      = mu + 1.96 * se)
+#' @param landscape 21x21 matrix with firebreaks applied (cleared cells -> 0)
+#' @param ignition  two-column (row, col) ignition matrix
+#' @param targets   data frame: row, col, weight
+#' @param K         number of replications
+validate_plan = function(landscape, ignition, targets, K = 1000) {
+  set.seed(1)                                          # reproducible sampling
+  damages = replicate(K, {
+    sim = simulate_fire(landscape, ignition, wind_speed = 0, wind_dir = 0)
+    compute_damage(sim$burned, targets)
+  })
+  mu = mean(damages); se = sd(damages) / sqrt(K)
+  c(mean = mu, ci_lo = mu - 1.96 * se, ci_hi = mu + 1.96 * se)
 }
 ```
 
@@ -530,19 +445,16 @@ $$f_\Theta(\theta) = 0.7 \cdot \frac{e^{3\cos(\theta - 1.5\pi)}}{2\pi\, I_0(3)} 
 
 The dominant mode ($\mu_1 = 1.5\pi$, westerly) pushes fire toward the settlement; the secondary mode ($\mu_2 = 0.75\pi$, south-easterly) toward the wetland. The von Mises CDF has no closed form, so we use acceptance-rejection with Uniform$(0, 2\pi)$ proposal, envelope $M = \max_\theta f_\Theta(\theta)$, and acceptance condition $U < f_\Theta(\theta)/M$.
 
-Each of $N$ scenarios samples $(V, \Theta, \text{ignition})$, runs the simulator, and records damage. Three plans share the same draws (common random numbers). We report $\mathbb{E}[D]$ with 95% CI and $\text{CVaR}_{0.9} = \mathbb{E}[D \mid D \geq q_{0.9}]$ with bootstrap CI.
+Each of $N$ scenarios samples $(V, \Theta, \text{ignition})$, runs the simulator, and records damage. The three plans are evaluated on the same sampled scenarios, so any difference in risk measures reflects the firebreaks, not the draws. We report $\mathbb{E}[D]$ with a 95% $t$-interval and $\text{CVaR}_{0.9} = \mathbb{E}[D \mid D \geq q_{0.9}]$ with a bootstrap CI.
 
 **Code**
 
-Three files implement the Monte Carlo evaluation: `step3_samplers.R`, `step3_monte_carlo.R`, and `step3_run.R`. The functions `simulate_fire()`, `set_firebreaks()`, and `compute_damage()` are from the provided course resource `fire-simulator.r`, used unchanged.
+Three files implement the evaluation: `step3_samplers.R`, `step3_monte_carlo.R`, and `step3_run.R`. `simulate_fire()`, `set_firebreaks()`, and `compute_damage()` are from the provided `fire-simulator.r` and used unchanged.
 
-Samplers (step3_samplers.R):
+Samplers (`step3_samplers.R`):
 
 ```r
-#' Target density: mixture of two von Mises
-#'
-#' @param theta Numeric vector of angles in [0, 2pi).
-#' @return Numeric vector of density values.
+#' Implements the wind-direction density f_Theta(theta) defined in the Model.
 dwind_dir = function(theta) {
   p1  = 0.7;   mu1 = 1.5 * pi;  kappa1 = 3
   p2  = 0.3;   mu2 = 0.75 * pi; kappa2 = 2
@@ -553,10 +465,9 @@ dwind_dir = function(theta) {
   p1 * vm1 + p2 * vm2
 }
 
-#' Acceptance-rejection sampler for wind direction
-#'
-#' @param n Integer, number of samples.
-#' @return Named list: samples, acceptance_rate, theoretical_rate, M.
+#' Samples wind direction by acceptance-rejection with Uniform(0, 2*pi) proposal.
+#' Envelope M = max f_Theta(theta) obtained by optimise().
+#' Returns samples plus the empirical and theoretical acceptance rates.
 sample_wind_dir = function(n) {
   opt = optimise(dwind_dir, interval = c(0, 2 * pi), maximum = TRUE)
   M   = opt$objective
@@ -586,20 +497,10 @@ sample_wind_dir = function(n) {
        theoretical_rate = 1 / (2 * pi * M), M = M)
 }
 
-#' Sample wind speeds from Weibull(shape=2, scale=7)
-#'
-#' @param n Integer, number of samples.
-#' @return Numeric vector of wind speeds in km/h.
-sample_wind_speed = function(n) {
-  rweibull(n, shape = 2, scale = 7)
-}
+#' Samples wind speed (km/h) from Weibull(shape = 2, scale = 7).
+sample_wind_speed = function(n) rweibull(n, shape = 2, scale = 7)
 
-
-#' Sample random ignition locations from vegetated cells
-#'
-#' @param landscape Integer matrix (21x21). Zero = bare ground.
-#' @param n Integer, number of ignition locations.
-#' @return n x 2 integer matrix with columns row and col.
+#' Samples ignition cells uniformly over the vegetated cells of `landscape`.
 sample_ignition = function(landscape, n) {
   veg_idx = which(landscape != 0, arr.ind = TRUE)
   chosen  = veg_idx[sample(nrow(veg_idx), size = n, replace = TRUE), , drop = FALSE]
@@ -608,21 +509,16 @@ sample_ignition = function(landscape, n) {
 }
 ```
 
-Monte Carlo evaluation (step3_monte_carlo.R):
+Monte Carlo evaluation and risk measures (`step3_monte_carlo.R`):
 
 ```r
-#' Evaluate firebreak plans under N shared scenarios (CRN)
-#'
-#' @param landscape Integer matrix (21x21).
-#' @param targets Data frame with row, col, weight.
-#' @param N Number of scenarios.
-#' @param plans Named list: NULL or n x 2 matrix (row, col).
-#' @return Named list of data frames per plan.
-run_mc_evaluation = function(landscape, targets, N, plans) {
-  wind_dir   = sample_wind_dir(N)$samples
-  wind_speed = sample_wind_speed(N)
-  ignition   = sample_ignition(landscape, N)
-
+#' Evaluates all plans on a pre-sampled batch of (wind_dir, wind_speed, ignition)
+#' scenarios, supplied by the caller so the same draws feed both diagnostics
+#' and the MC. Ignition on a cleared cell yields zero damage (no fire starts).
+run_mc_evaluation = function(landscape, targets, plans,
+                             wind_dir, wind_speed, ignition) {
+  N = length(wind_dir)
+  stopifnot(length(wind_speed) == N, nrow(ignition) == N)
   results = list()
   for (plan_name in names(plans)) {
     ls_plan = landscape
@@ -640,69 +536,76 @@ run_mc_evaluation = function(landscape, targets, N, plans) {
         damages[i] = compute_damage(result$burned, targets)
       }
     }
-    results[[plan_name]] = data.frame(
-      scenario = seq_len(N), damage = damages,
-      wind_speed = wind_speed, wind_dir = wind_dir,
-      ign_row = ignition[, "row"], ign_col = ignition[, "col"])
+    results[[plan_name]] = data.frame(scenario = seq_len(N), damage = damages,
+                                      wind_speed = wind_speed, wind_dir = wind_dir,
+                                      ign_row = ignition[, "row"],
+                                      ign_col = ignition[, "col"])
   }
   results
 }
-```
 
-Risk measures (step3_monte_carlo.R):
-
-```r
-#' Compute E[damage] with 95% CI and CVaR with bootstrap CI
-#'
-#' @param damages Numeric vector of simulated damages.
-#' @param alpha CVaR level (default 0.9 = worst 10%).
-#' @param n_boot Bootstrap replicates for CVaR CI.
-#' @return Data frame: measure, estimate, ci_lower, ci_upper.
+#' Computes mean damage, a 95% t-interval, and bootstrap CI for CVaR_alpha.
 compute_risk_measures = function(damages, alpha = 0.9, n_boot = 2000) {
   n     = length(damages)
   mu    = mean(damages)
   se_mu = sd(damages) / sqrt(n)
-  ci_mu = mu + c(-1, 1) * qnorm(0.975) * se_mu
+  ci_mu = mu + c(-1, 1) * qt(0.975, df = n - 1) * se_mu
 
   cvar_point = function(x) {
     threshold = quantile(x, probs = alpha)
     mean(x[x >= threshold])
   }
   cvar_est  = cvar_point(damages)
-  boot_cvar = replicate(n_boot, {
-    cvar_point(damages[sample.int(n, replace = TRUE)])
-  })
-  ci_cvar = quantile(boot_cvar, probs = c(0.025, 0.975))
+  boot_cvar = replicate(n_boot,
+                        cvar_point(damages[sample.int(n, replace = TRUE)]))
+  ci_cvar   = quantile(boot_cvar, probs = c(0.025, 0.975))
 
-  data.frame(
-    measure  = c("mean_damage", paste0("CVaR_", alpha)),
-    estimate = c(mu, cvar_est),
-    ci_lower = c(ci_mu[1], ci_cvar[[1]]),
-    ci_upper = c(ci_mu[2], ci_cvar[[2]]))
+  data.frame(measure  = c("mean_damage", paste0("CVaR_", alpha)),
+             estimate = c(mu, cvar_est),
+             ci_lower = c(ci_mu[1], ci_cvar[[1]]),
+             ci_upper = c(ci_mu[2], ci_cvar[[2]]))
 }
 ```
 
-Setup and plan definitions (step3_run.R):
+Workflow (`step3_run.R`). Using the landscape matrix and target table defined earlier from `landscape.csv` and `targets.csv`:
 
 ```r
 set.seed(1)
 N = 5000
 
-## Proposed plan: Step 2 Model B, B=13, alpha=0.1
-proposed = matrix(c(
-  1,15, 2,15, 3,15, 4,15, 5,15, 6,15, 7,15,
-  7,16, 7,17, 7,18, 7,19, 7,20, 7,21
-), byrow = TRUE, ncol = 2)
-colnames(proposed) = c("row", "col")
+## Proposed plan: Step 2 Model B, B=13, alpha=0.1 (L-shape at col 15 / row 7).
+proposed = rbind(cbind(row = 1:7,    col = 15L),
+                 cbind(row = 7L,     col = 16:21))
+corridor = cbind(row = rep(10L, 17), col = 3:19)
+plans    = list(baseline = NULL, corridor = corridor, proposed = proposed)
 
-corridor = cbind(row = rep(10L, 17), col = 3L:19L)
+## Pre-sample N scenarios ONCE on the set.seed(1) stream.
+dir_draws  = sample_wind_dir(N)
+wind_dir   = dir_draws$samples
+wind_speed = sample_wind_speed(N)
+ignition   = sample_ignition(landscape, N)
 
-plans = list(baseline = NULL, corridor = corridor, proposed = proposed)
+## Diagnostics reuse the SAME draws — no extra RNG consumed.
+pwind_dir = function(x) {
+  sapply(x, function(t) integrate(dwind_dir, 0, t)$value)
+}
+ks_p = ks.test(pwind_dir(wind_dir), "punif")$p.value
+
+cat(sprintf("M = %.3f   acceptance rate = %.3f   theoretical = %.3f   KS p = %.2f\n",
+            dir_draws$M, dir_draws$acceptance_rate,
+            dir_draws$theoretical_rate, ks_p))
+
+## Monte Carlo evaluation on those same scenarios.
+results    = run_mc_evaluation(landscape, targets, plans,
+                               wind_dir, wind_speed, ignition)
+risk_table = do.call(rbind, lapply(names(results), function(nm) {
+  cbind(plan = nm, compute_risk_measures(results[[nm]]$damage))
+}))
 ```
 
 **Results**
 
-The sampler achieves $M = 0.464$, acceptance rate 34.0% (theoretical $1/(2\pi M) = 34.3\%$). KS test $p = 0.95$ (Figure 3).
+The sampler achieves $M = 0.464$, acceptance rate 33.8% (theoretical $1/(2\pi M) = 34.3\%$). KS test $p = 0.73$ (Figure 3).
 
 [INSERT: figures/fig1_sampler_validation.png]
 
@@ -713,8 +616,8 @@ $N = 5{,}000$ scenarios (`set.seed(1)`):
 | Plan | Cells | $\mathbb{E}[D]$ | 95% CI | $\text{CVaR}_{0.9}$ | 95% CI |
 |------|-------|---------|--------|----------|--------|
 | No firebreaks | 0 | 13.77 | [13.19, 14.35] | 58.94 | [57.48, 66.21] |
-| Corridor | 17 | 4.10 | [3.77, 4.42] | 23.83 | [22.61, 34.28] |
-| Proposed | 13 | 4.35 | [4.08, 4.61] | 26.38 | [25.31, 27.50] |
+| Corridor | 17 | 4.09 | [3.77, 4.42] | 23.83 | [22.61, 34.28] |
+| Proposed | 13 | 4.34 | [4.08, 4.61] | 26.38 | [25.31, 27.50] |
 
 [INSERT: figures/fig2_damage_densities.png]
 
@@ -724,7 +627,7 @@ $N = 5{,}000$ scenarios (`set.seed(1)`):
 
 **Figure 5:** Proposed plan: damage vs wind speed by compass direction (left); mean damage by ignition cell (right).
 
-$N = 1{,}000$ pilot gave $\mathbb{E}[D] = 4.69$ vs 4.35, confirming stability.
+$N = 1{,}000$ pilot gave $\mathbb{E}[D] = 4.69$ vs 4.34, confirming stability.
 
 **Discussion**
 
@@ -734,7 +637,7 @@ The worst 10% are driven by ignition near targets (bypassing firebreaks) and wes
 
 CVaR is a more informative criterion than $\mathbb{E}[D]$: the mean is diluted by many zero-damage scenarios where fire never reaches targets. A CVaR-aware design would place firebreaks closer to targets to guard against nearby ignitions.
 
-Step 2's MILP predicted damage 14.1; the stochastic mean is 4.35. The plan remains effective because the MILP identified the structurally important corridors, which wind does not fundamentally alter.
+Step 2's MILP predicted damage 14.1; the stochastic mean is 4.34. The plan remains effective because the MILP identified the structurally important corridors, which wind does not fundamentally alter.
 
 ---
 

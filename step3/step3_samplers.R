@@ -6,15 +6,7 @@
 # Ignition:        uniform random vegetated cell
 # ============================================================
 
-#' Target density: mixture of two von Mises distributions
-#'
-#' Evaluates the probability density
-#'   f(theta) = 0.7 * vM(theta; mu1=1.5pi, kappa1=3)
-#'            + 0.3 * vM(theta; mu2=0.75pi, kappa2=2)
-#' where vM(theta; mu, kappa) = exp(kappa * cos(theta - mu)) / (2pi * I0(kappa)).
-#'
-#' @param theta Numeric vector of angles in [0, 2pi).
-#' @return Numeric vector of density values.
+#' Implements the wind-direction density f_Theta(theta) defined in the Model.
 dwind_dir = function(theta) {
   p1  = 0.7;   mu1 = 1.5 * pi;  kappa1 = 3
   p2  = 0.3;   mu2 = 0.75 * pi; kappa2 = 2
@@ -26,14 +18,9 @@ dwind_dir = function(theta) {
 }
 
 
-#' Acceptance-rejection sampler for wind direction
-#'
-#' Draws n samples from the mixture von Mises density using
-#' acceptance-rejection with a Uniform(0, 2pi) proposal.
-#' Envelope constant M = max f(theta) found via optimise().
-#'
-#' @param n Integer, number of samples to generate.
-#' @return A named list: samples, acceptance_rate, theoretical_rate, M.
+#' Samples wind direction by acceptance-rejection with Uniform(0, 2*pi) proposal.
+#' Envelope M = max f_Theta(theta) obtained by optimise().
+#' Returns samples plus empirical and theoretical acceptance rates.
 sample_wind_dir = function(n) {
   opt = optimise(dwind_dir, interval = c(0, 2 * pi), maximum = TRUE)
   M   = opt$objective
@@ -70,20 +57,13 @@ sample_wind_dir = function(n) {
 }
 
 
-#' Sample wind speeds from Weibull(shape=2, scale=7)
-#'
-#' @param n Integer, number of samples.
-#' @return Numeric vector of wind speeds in km/h.
+#' Samples wind speed (km/h) from Weibull(shape = 2, scale = 7) by inverse transform.
 sample_wind_speed = function(n) {
   rweibull(n, shape = 2, scale = 7)
 }
 
 
-#' Sample random ignition locations from vegetated cells
-#'
-#' @param landscape Integer matrix (21x21). Zero = bare ground.
-#' @param n Integer, number of ignition locations.
-#' @return n x 2 integer matrix with columns row and col.
+#' Samples ignition cells uniformly over the vegetated cells of `landscape`.
 sample_ignition = function(landscape, n) {
   veg_idx = which(landscape != 0, arr.ind = TRUE)
   chosen  = veg_idx[sample(nrow(veg_idx), size = n, replace = TRUE), , drop = FALSE]

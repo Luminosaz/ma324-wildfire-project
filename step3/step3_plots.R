@@ -18,10 +18,12 @@ plan_names = c(baseline = "No firebreaks", corridor = "Corridor", proposed = "Pr
 
 ## ============================================================
 ## FIGURE 1: Sampler validation (2 x 1)
+## Uses the same N = 5000 batch consumed by the Monte Carlo so that
+## the acceptance / KS numbers in the Results match the figure.
 ## ============================================================
 set.seed(1)
-wd_samples = sample_wind_dir(10000)$samples
-ws_samples = sample_wind_speed(10000)
+wd_samples = sample_wind_dir(5000)$samples
+ws_samples = sample_wind_speed(5000)
 
 png(file.path(fig_dir, "fig1_sampler_validation.png"),
     width = 10, height = 5, units = "in", res = 300)

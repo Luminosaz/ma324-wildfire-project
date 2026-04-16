@@ -75,19 +75,40 @@ for (nm in names(plans)) {
 cat("\n")
 
 ## ----------------------------------------------------------
-## 4. Run Monte Carlo (default N = 1000, override before source)
+## 4. Pre-sample N scenarios once (reused for diagnostics + MC)
 ## ----------------------------------------------------------
 if (!exists("N")) N = 1000
-cat("Running Monte Carlo with N =", N, "scenarios ...\n\n")
+cat("Sampling", N, "scenarios ...\n")
+
+dir_draws  = sample_wind_dir(N)
+wind_dir   = dir_draws$samples
+wind_speed = sample_wind_speed(N)
+ignition   = sample_ignition(landscape, N)
+
+## Diagnostics reuse the SAME draws — no extra RNG consumed.
+pwind_dir = function(x) {
+  sapply(x, function(t) integrate(dwind_dir, 0, t)$value)
+}
+ks_p = ks.test(pwind_dir(wind_dir), "punif")$p.value
+
+cat(sprintf("  M = %.3f   acceptance rate = %.3f   theoretical = %.3f   KS p = %.2f\n",
+            dir_draws$M, dir_draws$acceptance_rate,
+            dir_draws$theoretical_rate, ks_p))
+
+## ----------------------------------------------------------
+## 5. Run Monte Carlo on the pre-sampled scenarios
+## ----------------------------------------------------------
+cat("\nRunning Monte Carlo with N =", N, "scenarios ...\n\n")
 
 t0      = proc.time()
-results = run_mc_evaluation(landscape, targets, N, plans)
+results = run_mc_evaluation(landscape, targets, plans,
+                            wind_dir, wind_speed, ignition)
 elapsed = (proc.time() - t0)["elapsed"]
 
 cat(sprintf("\nTotal elapsed time: %.1f seconds\n\n", elapsed))
 
 ## ----------------------------------------------------------
-## 5. Compute risk measures for each plan
+## 6. Compute risk measures for each plan
 ## ----------------------------------------------------------
 risk_list = lapply(names(results), function(nm) {
   rm          = compute_risk_measures(results[[nm]]$damage)
@@ -99,7 +120,7 @@ risk_table = do.call(rbind, risk_list)
 risk_table = risk_table[, c("plan", "measure", "estimate", "ci_lower", "ci_upper")]
 
 ## ----------------------------------------------------------
-## 6. Print comparison table
+## 7. Print comparison table
 ## ----------------------------------------------------------
 cat("============================================================\n")
 cat("  RISK MEASURE COMPARISON\n")
@@ -116,7 +137,7 @@ for (m in unique(risk_table$measure)) {
 }
 
 ## ----------------------------------------------------------
-## 7. Save results
+## 8. Save results
 ## ----------------------------------------------------------
 ## per-scenario results (long format)
 all_scenarios = do.call(rbind, lapply(names(results), function(nm) {

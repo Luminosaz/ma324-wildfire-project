@@ -8,29 +8,16 @@
 # ============================================================
 
 
-#' Monte Carlo evaluation of firebreak plans
-#'
-#' Pre-samples N scenarios (wind speed, wind direction, ignition point),
-#' then evaluates every plan against the same random draws (common
-#' random numbers) so that plan comparisons are fair.
-#'
-#' @param landscape Integer matrix (21x21) from landscape.csv.
-#' @param targets Data frame with columns row, col, weight.
-#' @param N Integer, number of Monte Carlo scenarios.
-#' @param plans Named list of firebreak specifications. Each element is
-#'   either NULL (no firebreaks) or an n x 2 integer matrix with
-#'   columns row, col giving the cells to clear.
-#' @return Named list (one entry per plan) of data frames with columns
-#'   scenario, damage, wind_speed, wind_dir, ign_row, ign_col.
-run_mc_evaluation = function(landscape, targets, N, plans) {
+#' Evaluates all plans on a pre-sampled batch of (wind_dir, wind_speed, ignition)
+#' scenarios. Accepting the scenarios as arguments lets the caller reuse the
+#' same draws for diagnostics and the Monte Carlo evaluation.
+#' Ignition on a cleared cell yields zero damage (no fire starts).
+run_mc_evaluation = function(landscape, targets, plans,
+                             wind_dir, wind_speed, ignition) {
 
-  ## 1. Pre-sample all N scenarios (shared across plans = CRN)
-  cat("Sampling", N, "scenarios ...\n")
-  wind_dir   = sample_wind_dir(N)$samples
-  wind_speed = sample_wind_speed(N)
-  ignition   = sample_ignition(landscape, N)   # N x 2 matrix
+  N = length(wind_dir)
+  stopifnot(length(wind_speed) == N, nrow(ignition) == N)
 
-  ## 2. Evaluate each plan
   results = list()
 
   for (plan_name in names(plans)) {
@@ -79,24 +66,15 @@ run_mc_evaluation = function(landscape, targets, N, plans) {
 }
 
 
-#' Compute risk measures from a damage vector
-#'
-#' Returns mean damage with 95% CI (normal approximation) and
-#' CVaR at level alpha with 95% CI (bootstrap).
-#'
-#' @param damages Numeric vector of simulated damages.
-#' @param alpha Numeric in (0,1). CVaR is mean of worst 1-alpha
-#'   fraction. Default 0.9 (worst 10%).
-#' @param n_boot Integer, bootstrap replicates for CVaR CI.
-#' @return Data frame with columns measure, estimate, ci_lower, ci_upper.
+#' Computes mean damage, a 95% t-interval, and bootstrap CI for CVaR_alpha.
 compute_risk_measures = function(damages, alpha = 0.9, n_boot = 2000) {
 
   n = length(damages)
 
-  ## Mean damage + 95% CI
+  ## Mean damage + 95% t-interval
   mu    = mean(damages)
   se_mu = sd(damages) / sqrt(n)
-  ci_mu = mu + c(-1, 1) * qnorm(0.975) * se_mu
+  ci_mu = mu + c(-1, 1) * qt(0.975, df = n - 1) * se_mu
 
   ## CVaR_alpha = E[X | X >= VaR_alpha]
   cvar_point = function(x) {
