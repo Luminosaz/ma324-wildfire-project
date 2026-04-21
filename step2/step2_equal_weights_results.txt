@@ -1,0 +1,54 @@
+# Equal-weights sensitivity check (brief §4.2.4 Q4)
+# Model B, B=13, alpha=0.1, settlement weight = wetland weight = 5
+# Generated: 2026-04-21 02:29:56.078336
+
+## Original weights (from targets.csv): settlement=10, wetland=5
+## Equal weights: settlement=5, wetland=5
+
+## Solve 1: 120s time limit (matches main sweep in step2_solve.R)
+SUMMARY,14.071158,402
+absmipgap=3.53951, relmipgap=0.251544
+CLEARED: 1_15, 2_15, 3_15, 4_15, 5_15, 6_15, 7_15, 7_16, 7_17, 7_18, 7_19, 7_20, 7_21
+DAMAGED,3_3,5,0.127990
+DAMAGED,4_3,5,0.152361
+DAMAGED,5_3,5,0.189085
+DAMAGED,6_3,5,0.230752
+DAMAGED,3_4,5,0.121616
+DAMAGED,4_4,5,0.150930
+DAMAGED,5_4,5,0.189085
+DAMAGED,6_4,5,0.236886
+DAMAGED,3_5,5,0.124849
+DAMAGED,4_5,5,0.150930
+DAMAGED,5_5,5,0.189085
+DAMAGED,6_5,5,0.236886
+DAMAGED,3_6,5,0.131393
+DAMAGED,4_6,5,0.156411
+DAMAGED,5_6,5,0.189085
+DAMAGED,6_6,5,0.236886
+
+## Solve 2: 600s time limit (extended check for incumbent stability)
+SUMMARY,14.071158,402
+absmipgap=1.96627, relmipgap=0.139738
+CLEARED: 1_15, 2_15, 3_15, 4_15, 5_15, 6_15, 7_15, 7_16, 7_17, 7_18, 7_19, 7_20, 7_21
+DAMAGED,3_3,5,0.127990
+DAMAGED,4_3,5,0.152361
+DAMAGED,5_3,5,0.189085
+DAMAGED,6_3,5,0.230752
+DAMAGED,3_4,5,0.121616
+DAMAGED,4_4,5,0.150930
+DAMAGED,5_4,5,0.189085
+DAMAGED,6_4,5,0.236886
+DAMAGED,3_5,5,0.124849
+DAMAGED,4_5,5,0.150930
+DAMAGED,5_5,5,0.189085
+DAMAGED,6_5,5,0.236886
+DAMAGED,3_6,5,0.131393
+DAMAGED,4_6,5,0.156411
+DAMAGED,5_6,5,0.189085
+DAMAGED,6_6,5,0.236886
+
+## Interpretation
+# L-shape reference (original 10:5 weights at B=13, alpha=0.1):
+#   col 15 rows 1-7 + row 7 cols 15-21 (settlement-focused)
+# L-shape match at 120s: YES (same geometry)
+# L-shape match at 600s: YES (same geometry)
